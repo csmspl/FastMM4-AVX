@@ -1,112 +1,156 @@
 (*
 
-FastMM4-AVX (AVX1/AVX2/AVX512/ERMS support for FastMM4)
+FastMM4-AVX (efficient synchronization and AVX1/AVX2/AVX512/ERMS support for FastMM4)
+ - Copyright (C) 2017-2020 Ritlabs, SRL. All rights reserved.
+ - Copyright (C) 2020 Maxim Masiutin. All rights reserved.
 
-Version 1.03
+Written by Maxim Masiutin <maxim.masiutin@gmail.com>
 
-This is a fork of the Fast Memory Manager 4.992 by Pierre le Riche
+Version 1.04
+
+This is a fork of the "Fast Memory Manager" (FastMM) v4.992 by Pierre le Riche
 (see below for the original FastMM4 description)
 
-FastMM4-AVX is used as a memory manager for "The Bat!" email client
-https://www.ritlabs.com/en/products/thebat/
-
 What was added to FastMM4-AVX in comparison to the original FastMM4:
- - if the CPU supports AVX or AVX2, use the 32-byte YMM registers
-   for faster memory copy, and if the CPU supports AVX-512,
-   use the 64-byte ZMM registers for even faster memory copy;
-   use DisableAVX to turn AVX off completely or
-   use DisableAVX1/DisableAVX2/DisableAVX512 to disable separately certain
-   AVX-related instruction set from being compiled into FastMM4);
- - if EnableAVX is defined, all memory blocks are aligned by 32 bytes, but
-   you can also use Align32Bytes define without AVX; please note that the memory
-   overhead is higher when the blocks are aligned by 32 bytes, because some
-   memory is lost by padding;
- - with AVX, memory copy is secure - all XMM/YMM/ZMM registers used to copy
-   memory are cleared by vxorps/vpxor, so the leftovers of the copied memory
-   are not exposed in the XMM/YMM/ZMM registers;
- - properly handle AVX-SSE transitions to not incur the transition penalties,
-   only call vzeroupper under AVX1, but not under AVX2 since it slows down
-   subsequent SSE code under Skylake / Kaby Lake;
- - improved multi-threading locking mechanism - so the testing application
-   (from the FastCode challenge) works up to twitce faster when the number of
-   threads is the same or larger than the number of physical cores;
- - if the CPU supports Enhanced REP MOVSB/STOSB (ERMS), use this feature
-   for faster memory copy (under 32 bit or 64-bit) (see the EnableERMS define,
-   on by default, use DisableERMS to turn it off);
- - support for Lazarus 1.6.4 with FreePascal (the original FastMM4 4.992
-   requires modifications, it doesn't work under Lazarus 1.6.4 with FreePascal
-   out-of-the-box, also tested under Lazarus 1.8.2 / FPC 3.0.4 with Win32
-   target;
- - proper branch target alignment in assembly routines;
- - compare instructions + conditional jump instructions are put together
-   to allow macro-op fusion (which happens since Core2 processors, when
-   the first instruction is a CMP or TEST instruction and the second instruction
-   is a conditional jump instruction);
- - names assigned to some constants that used to be "magic constants",
-   i.e. unnamed numerical constants - plenty of them were present
-   throughout the whole code.
- - multiplication and division by constant which is a power of 2
-   replaced to shl/shr, because Delphi64 compiler doesn't replace such
-   multiplications and divisions to shl/shr processor instructions,
-   and, according to the Intel Optimization Guide, shl/shr is much faster
-   than imul/idiv, especially on Knights Landing processors;
- - the compiler environment is more flexible now: you can now compile FastMM4
-   with, for example, typed "@" operator or any other option. Almost all
-   externally-set compiler directives are honored by FastMM except a few
-   (currently just one) - look for the "Compiler options for FastMM4" section
-   below to see what options cannot be externally set and are always
-   redefined by FastMM4 for itself - even if you set up these compiler options
-   differently outside FastMM4, they will be silently
-   redefined, and the new values will be used for FastMM4 only;
- - those fixed-block-size memory move procedures that are not needed
-   (under the current bitness and alignment compbinations) are
-   explicitly excluded from compiling, to not rely on the compiler
-   that is supposed to remove these function after copmpilation;
- - added length parameter to what were dangerous nul-terminated string
-   operations via PAnsiChar, to prevent potential stack buffer overruns
-   (or maybe even stack-based exploitation?), and there some Pascal functions
-   also left, the argument is not yet checked, see the "todo" comments
-   to figure out where the length is not yet checked. Anyway, since these
-   memory functions are only used in Debug mode, i.e. in development
-   environment, not in Release (production), the impact of this
-   "vulnerability" is minimal (albeit this is a questionable statement);
- - removed some typecasts; the code is stricter to let the compiler
-   do the job, check everything and mitigate probable error. You can
-   even compile the code with "integer overflow checking" and
-   "range checking", as well as with "typed @ operator" - for safer
-   code. Also added round bracket in the places where the typed @ operator
-   was used, to better emphasize on who's address is taken;
- - one-byte data types of memory areas used for locking ("lock cmpxchg" or
-   "lock xchg" replaced from Boolean to Byte for stricter type checking;
- - used simpler lock instructions: "lock xchg" rather than "lock cmpxchg";
- - implemented dedicated lock and unlock procedures; before that, locking
-   operations were scattered throughout the code; now the locking function
-   have meaningful names: AcquireLockByte and ReleaseLockByte; the values of the
-   lock byte is now checked for validity when "FullDebugMode" or "DEBUG" is on,
-   to detect cases when the same lock is released twice, and other improper
-   use of the lock bytes;
- - added compile-time options (SmallBlocksLockedCriticalSection/
-   MediumBlocksLockedCriticalSection/LargeBlocksLockedCriticalSection)
-   that remove spin-loops of Sleep(0) or (Sleep(InitialSleepTime)) and
-   Sleep(1) (or Sleep(AdditionalSleepTime)) and replaced them with
-   EnterCriticalSection/LeaveCriticalSection to save valuable CPU cycles
-   wasted by Sleep(0) and to improve speed that was affected each time by
-   at least 1 millisecond by Sleep(1); on the other hand, the CriticalSections
-   are much more CPU-friendly and have definitely lower latency than Sleep(1);
-   besides that, it checks if the CPU supports SSE2 and thus the "pause"
-   instruction, it uses "pause" spin-loop for 5000 iterations and then
-   SwitchToThread() instead of critical sections; If a CPU doesn't have the
-   "pause" instrcution or Windows doesn't have the SwitchToThread() API
-   function, it will use EnterCriticalSection/LeaveCriticalSection.
+
+ - Efficient synchronization 
+   - improved synchronization between the threads; proper synchronization
+     techniques are used depending on context and availability, i.e. spin-wait
+     loops, SwitchToThread, critical sections, etc.;
+   - used the "test, test-and-set" technique for the spin-wait loops; this
+     technique is recommended by Intel (see Section 11.4.3 "Optimization with
+     Spin-Locks" of the Intel 64 and IA-32 Architectures Optimization Reference
+     Manual) to determine the availability of the synchronization variable;
+     according to this technique, the first "test" is done via the normal
+     (non-locking) memory load to prevent excessive bus locking on each
+     iteration of the the spin-wait loop; if the variable is available upon
+     the normal memory load of the first step ("test"), proceed to the
+     second step ("test-and-set") which is done via the bus-locking atomic
+     "xchg" instruction; however this two-steps approach of using "test" before
+     "test-and-set" can increase the cost for the un-contended case comparing
+     to just single-step "test-and-set", this may explain why the speed benefits
+     of the FastMM4-AVX are more pronounced when the memory manager is called
+     from multiple treads in parallel, while in single-treaded use scenario
+     there may be no benefit comparing to the original FastMM4;
+   - the number of iterations of "pause"-based spin-wait loops is 5000,
+     before relinquishing to SwitchToThread();
+   - see https://stackoverflow.com/a/44916975/6910868 for more details on the
+     implementation of the "pause"-based spin-wait loops;
+   - using normal memory store to release a lock:
+     FastMM4-AVX uses normal memory store, i.e. the "mov" instruction, rather
+     then the bus-locking "xchg" instruction to write into the synchronization
+     variable (LockByte) to "release a lock" on a data structure,
+     see https://stackoverflow.com/a/44959764/6910868
+     for discussion on releasing a lock;
+     you man define "InterlockedRelease" to get old behaviour of the original
+     FastMM4.
+   - implemented dedicated lock and unlock procedures that operate with
+     synchronization variables (LockByte);
+     before that, locking operations were scattered throughout the code;
+     now the locking function have meaningful names:
+     AcquireLockByte and ReleaseLockByte;
+     the values of the lock byte is now checked for validity when
+     FullDebugMode or DEBUG is defined, to detect cases when the same lock is
+     released twice, and other improper use of the lock bytes;
+   - added compile-time options "SmallBlocksLockedCriticalSection",
+     "MediumBlocksLockedCriticalSection" and "LargeBlocksLockedCriticalSection"
+     which are set by default (inside the FastMM4Options.inc file) as
+     conditional defines. If you undefine these options, you will get the
+     old locking mechanism of the original FastMM4 based on loops of Sleep() or
+     SwitchToThread().
+
+ - AVX, AVX2 or AVX512 instructions for faster memory copy
+   - if the CPU supports AVX or AVX2, use the 32-byte YMM registers
+     for faster memory copy, and if the CPU supports AVX-512,
+     use the 64-byte ZMM registers for even faster memory copy;
+   - please note that the effect of using AVX instruction in speed improvement is
+     negligible, comparing to the effect brought by efficient synchronizaton;
+     sometimes AVX instructions can even slow down the program because of AVX-SSE
+     transition penalties and reduced CPU frequency caused by AVX-512
+     instructions in some processors; use DisableAVX to turn AVX off completely
+     or use DisableAVX1/DisableAVX2/DisableAVX512 to disable separately certain
+     AVX-related instruction set from being compiled);
+   - if EnableAVX is defined, all memory blocks are aligned by 32 bytes, but
+     you can also use Align32Bytes define without AVX; please note that the memory
+     overhead is higher when the blocks are aligned by 32 bytes, because some
+     memory is lost by padding;
+   - with AVX, memory copy is secure - all XMM/YMM/ZMM registers used to copy
+     memory are cleared by vxorps/vpxor, so the leftovers of the copied memory
+     are not exposed in the XMM/YMM/ZMM registers;
+   - the code attempts to properly handle AVX-SSE transitions to not incur the
+     transition penalties, only call vzeroupper under AVX1, but not under AVX2
+     since it slows down subsequent SSE code under Skylake / Kaby Lake;
+   - on AVX-512, writing to xmm16-xmm31 registers will not affect the turbo
+     clocks, and will not impose AVX-SSE transition penalties; therefore, when we
+     have AVX-512, we now only use x(y/z)mm16-31 registers.
+
+ - Speed improvements due to code optimization and proper techniques
+   - if the CPU supports Enhanced REP MOVSB/STOSB (ERMS), use this feature
+     for faster memory copy (under 32 bit or 64-bit) (see the EnableERMS define,
+     on by default, use DisableERMS to turn it off);
+   - branch target alignment in assembly routines is only used when
+     EnableAsmCodeAlign is defined; Delphi may incorrectly encode conditional
+     jumps, i.e. use long, 6-byte instructions instead of just short, 2-byte,
+     and this may affect branch prediction, so the benefits of branch target
+     alignment may not outweight the disadvantage of affected branch prediction;
+   - compare instructions + conditional jump instructions are put together
+     to allow macro-op fusion (which happens since Core2 processors, when
+     the first instruction is a CMP or TEST instruction and the second
+     instruction is a conditional jump instruction);
+   - multiplication and division by constant which is a power of 2
+     replaced to shl/shr, because Delphi64 compiler doesn't replace such
+     multiplications and divisions to shl/shr processor instructions,
+     and, according to the Intel Optimization Reference Manual, shl/shr is
+     faster than imul/idiv, at least for some processors.
+
+ - Safer, cleaner code with striter type adherence and better compatibility
+   - names assigned to some constants that used to be "magic constants",
+     i.e. unnamed numerical constants - plenty of them were present
+     throughout the whole code;
+   - removed some typecasts; the code is stricter to let the compiler
+     do the job, check everything and mitigate probable error. You can
+     even compile the code with "integer overflow checking" and
+     "range checking", as well as with "typed @ operator" - for safer
+     code. Also added round bracket in the places where the typed @ operator
+     was used, to better emphasize on who's address is taken;
+   - the compiler environment is more flexible now: you can now compile FastMM4
+     with, for example, typed "@" operator or any other option. Almost all
+     externally-set compiler directives are honored by FastMM except a few
+     (currently just one) - look for the "Compiler options for FastMM4" section
+     below to see what options cannot be externally set and are always
+     redefined by FastMM4 for itself - even if you set up these compiler options
+     differently outside FastMM4, they will be silently
+     redefined, and the new values will be used for FastMM4 only;
+   - the type of one-byte synchronization variables (accessed via "lock cmpxchg"
+     or "lock xchg") replaced from Boolean to Byte for stricter type checking;
+   - those fixed-block-size memory move procedures that are not needed
+     (under the current bitness and alignment compbinations) are
+     explicitly excluded from compiling, to not rely on the compiler
+     that is supposed to remove these function after copmpilation;
+   - added length parameter to what were dangerous nul-terminated string
+     operations via PAnsiChar, to prevent potential stack buffer overruns
+     (or maybe even stack-based exploitation?), and there some Pascal functions
+     also left, the argument is not yet checked, see the "todo" comments
+     to figure out where the length is not yet checked. Anyway, since these
+     memory functions are only used in Debug mode, i.e. in development
+     environment, not in Release (production), the impact of this
+     "vulnerability" is minimal (albeit this is a questionable statement);
+   - removed all non-US-ASCII characters, to avoid using UTF-8 BOM, for
+     better compatibility with very early versions of Delphi (e.g. Delphi 5),
+     thanks to Valts Silaputnins;
+   - support for Lazarus 1.6.4 with FreePascal (the original FastMM4 4.992
+     requires modifications, it doesn't work under Lazarus 1.6.4 with FreePascal
+     out-of-the-box, also tested under Lazarus 1.8.2 / FPC 3.0.4 with Win32
+     target; later versions should be also supported.
 
 Here are the comparison of the Original FastMM4 version 4.992, with default
 options compiled for Win64 by Delphi 10.2 Tokyo (Release with Optimization),
-and the current FastMM4-AVX branch. Under some scenarios, the FastMM4-AVX branch
-is more than twice as fast comparing to the Original FastMM4. The tests
-have been run on two different computers: one under Xeon E5-2543v2 with 2 CPU
-sockets, each has 6 physical cores (12 logical threads) - with only 5 physical
-core per socket enabled for the test application. Another test was done under
-an i7-7700K CPU.
+and the current FastMM4-AVX branch ("AVX-br."). Under some multi-threading
+scenarios, the FastMM4-AVX branch is more than twice as fast comparing to the
+Original FastMM4. The tests have been run on two different computers: one
+under Xeon E5-2543v2 with 2 CPU sockets, each has 6 physical cores
+(12 logical threads) - with only 5 physical core per socket enabled for the
+test application. Another test was done under an i7-7700K CPU.
 
 Used the "Multi-threaded allocate, use and free" and "NexusDB"
 test cases from the FastCode Challenge Memory Manager test suite,
@@ -162,13 +206,30 @@ Here are some more test results (Compiled by Delphi 10.2 Update 3):
 
 The above tests (on Xeon E5-2667v4 and i9) have been done on 03-May-2018.
 
+Here is the single-threading performance comparison in some selected
+scenarois between FastMM v5.01 dated Jun 12, 2020 and FastMM4-AVX v1.03
+dated Jun 14, 2020. FastMM4-AVX is compiled without assembly inlines
+and without AVX instructions. This test is run on Jun 16, 2020, under
+Intel Core i7-1065G7 CPU (base frequency: 1.3 GHz, 4 cores, 8 threads).
+Compiled under Delphi 10.3 Update 3, 64-bit target. Please note that
+these are the selected scenarios where FastMM4-AVX is faster then 
+FastMM5. In other scenarios, especially in multi-threaded with heavy
+contention, FastMM5 is faster.
+
+                                             FastMM5  AVX-br.   Ratio
+                                              ------  ------   ------
+    ReallocMem Small (1-555b) benchmark         9285    7013   75.53%
+    ReallocMem Medium (1-4039b) benchmark      12002   10186   84.87%
+    Block downsize                             12463    9474   76.02%
+    VerySmall downsize benchmark               12025   11012   91.58%
+    Address space creep benchmark              14212   10845   76.31%
+    Address space creep (larger blocks)        16237   13629   83.94%
+    Single-threaded reallocate and use         15462   13750   88.93%
+    Single-threaded tiny reallocate and use     9263    7203   77.76%
+    Single-threaded allocate, use and free     14885   14211   95.47%
+
 You can find the program, used to generate the benchmark data,
 at https://github.com/maximmasiutin/FastCodeBenchmark
-
-
-AVX1/AVX2/ERMS support Copyright (C) 2017-2018 Ritlabs S.R.L. All rights reserved.
-https://www.ritlabs.com/
-AVX1/AVX2/ERMS support is written by Maxim Masiutin <max@ritlabs.com>
 
 FastMM4-AVX is released under a dual license, and you may choose to use it
 under either the Mozilla Public License 2.0 (MPL 2.1, available from
@@ -193,16 +254,19 @@ If not, see <http://www.gnu.org/licenses/>.
 
 FastMM4-AVX Version History:
 
-1.03 (04 May 2018) - minor fixes for the debug mode, FPC compatibility
-     and code readability cosmetic fixes.
-
-1.02 (07 November 2017) - added and tested support for the AVX-512
-     instruction set.
-
-1.01 (10 October 2017) - made the source code compile under Delphi5,
-     thanks to Valts Silaputnins.
-
-1.00 (27 July 2017) - initial revision.
+- 1.04 (O6 October 2020) - improved use of AVX-512 instructions to avoid turbo
+    clock reduction and SSE/AVX transition penalty; made explicit order of
+    parameters for GetCPUID to avoid calling convention ambiguity that could
+    lead to incorrect use of registers and finally crashes, i.e. under Linux;
+    improved explanations and comments, i.e. about the use of the
+    synchronization techniques.
+- 1.03 (04 May 2018) - minor fixes for the debug mode, FPC compatibility
+    and code readability cosmetic fixes.
+- 1.02 (07 November 2017) - added and tested support for the AVX-512
+    instruction set.
+- 1.01 (10 October 2017) - made the source code compile under Delphi5,
+    thanks to Valts Silaputnins.
+- 1.00 (27 July 2017) - initial revision.
 
 
 The original FastMM4 description follows:
@@ -265,33 +329,20 @@ License:
  License 2.1 (LGPL 2.1, available from
  http://www.opensource.org/licenses/lgpl-license.php). If you find FastMM useful
  or you would like to support further development, a donation would be much
- appreciated. My banking details are:
-   Country: South Africa
-   Bank: ABSA Bank Ltd
-   Branch: Somerset West
-   Branch Code: 334-712
-   Account Name: PSD (Distribution)
-   Account No.: 4041827693
-   Swift Code: ABSAZAJJ
+ appreciated.
  My PayPal account is:
-   bof@psd.co.za
+   paypal@leriche.org
 
 Contact Details:
  My contact details are shown below if you would like to get in touch with me.
  If you use this memory manager I would like to hear from you: please e-mail me
  your comments - good and bad.
- Snailmail:
-   PO Box 2514
-   Somerset West
-   7129
-   South Africa
  E-mail:
-   plr@psd.co.za
+   fastmm@leriche.org
 
 Support:
  If you have trouble using FastMM, you are welcome to drop me an e-mail at the
- address above, or you may post your questions in the BASM newsgroup on the
- Embarcadero news server (which is where I hang out quite frequently).
+ address above.
 
 Disclaimer:
  FastMM has been tested extensively with both single and multithreaded
@@ -367,8 +418,8 @@ Acknowledgements (for version 4):
  - Kristofer Skaug for reporting the bug that sometimes causes the leak report
    to be shown, even when all the leaks have been registered as expected leaks.
    Also for some useful enhancement suggestions.
- - Günther Schoch for the "RequireDebuggerPresenceForLeakReporting" option.
- - Jan Schlüter for the "ForceMMX" option.
+ - Guenter Schoch for the "RequireDebuggerPresenceForLeakReporting" option.
+ - Jan Schlueter for the "ForceMMX" option.
  - Hallvard Vassbotn for various good enhancement suggestions.
  - Mark Edington for some good suggestions and bug reports.
  - Paul Ishenin for reporting the compilation error when the NoMessageBoxes
@@ -426,7 +477,7 @@ Acknowledgements (for version 4):
    not work in FullDebugMode.
  - Ionut Muntean for the Romanian translation.
  - Florent Ouchet for the French translation.
- - Marcus Mönnig for the ScanMemoryPoolForCorruptions suggestion and the
+ - Marcus Moennig for the ScanMemoryPoolForCorruptions suggestion and the
    suggestion to have the option to scan the memory pool before every
    operation when in FullDebugMode.
  - Francois Piette for bringing under my attention that
@@ -645,10 +696,10 @@ Change log:
    leaks were registered as expected leaks. (Thanks to Kristofer Skaug.)
  Version 4.29 (30 September 2005):
  - Added the "RequireDebuggerPresenceForLeakReporting" option to only display
-   the leak report if the application is run inside the IDE. (Thanks to Günther
+   the leak report if the application is run inside the IDE. (Thanks to Guenter
    Schoch.)
  - Added the "ForceMMX" option, which when disabled will check the CPU for
-   MMX compatibility before using MMX. (Thanks to Jan Schlüter.)
+   MMX compatibility before using MMX. (Thanks to Jan Schlueter.)
  - Added the module name to the title of error dialogs to more easily identify
    which application caused the error. (Thanks to Kristofer Skaug.)
  - Added an ASCII dump to the "FullDebugMode" memory dumps. (Thanks to Hallvard
@@ -1470,7 +1521,7 @@ of just one option: "Boolean short-circuit evaluation".}
 {-------------------------Public constants-----------------------------}
 const
   {The current version of FastMM}
-  FastMMVersion = '4.991';
+  FastMMVersion = '4.992';
   {The number of small block types}
 
 {$ifdef Align32Bytes}
@@ -1583,6 +1634,16 @@ type
   {The callback procedure for WalkAllocatedBlocks.}
   TWalkAllocatedBlocksCallback = procedure(APBlock: Pointer; ABlockSize: NativeInt; AUserData: Pointer);
 
+  TFastMM_MemoryManagerInstallationState = (
+    {The default memory manager is currently in use.}
+    mmisDefaultMemoryManagerInUse,
+    {Another third party memory manager has been installed.}
+    mmisOtherThirdPartyMemoryManagerInstalled,
+    {A shared memory manager is being used.}
+    mmisUsingSharedMemoryManager,
+    {This memory manager has been installed.}
+    mmisInstalled);
+
 {--------------------------Public variables----------------------------}
 var
   {If this variable is set to true and FullDebugMode is enabled, then the
@@ -1678,7 +1739,7 @@ var
 {$ifndef FullDebugMode}
 {The standard memory manager functions}
 function FastGetMem(ASize: {$ifdef XE2AndUp}NativeInt{$else}{$ifdef fpc}NativeUInt{$else}Integer{$endif}{$endif}): Pointer;
-function FastFreeMem(APointer: Pointer): {$ifdef fpc}{$IFDEF CPU64}PtrUInt{$ELSE}NativeUInt{$ENDIF}{$else}Integer{$endif};
+function FastFreeMem(APointer: Pointer): {$ifdef fpc}{$ifdef CPU64}PtrUInt{$else}NativeUInt{$endif}{$else}Integer{$endif};
 function FastReallocMem({$ifdef fpc}var {$endif}APointer: Pointer; ANewSize: {$ifdef XE2AndUp}NativeInt{$else}{$ifdef fpc}NativeUInt{$else}Integer{$endif}{$endif}): Pointer;
 function FastAllocMem(ASize: {$ifdef XE2AndUp}NativeInt{$else}{$ifdef fpc}NativeUInt{$else}Cardinal{$endif}{$endif}): Pointer;
 {$else}
@@ -1724,12 +1785,14 @@ function FastGetHeapStatus: THeapStatus;
 {Returns statistics about the current state of the memory manager}
 procedure GetMemoryManagerState(var AMemoryManagerState: TMemoryManagerState);
 {Returns a summary of the information returned by GetMemoryManagerState}
-procedure GetMemoryManagerUsageSummary(
-  var AMemoryManagerUsageSummary: TMemoryManagerUsageSummary);
+function GetMemoryManagerUsageSummary: TMemoryManagerUsageSummary; overload;
+procedure GetMemoryManagerUsageSummary(var AMemoryManagerUsageSummary: TMemoryManagerUsageSummary); overload;
 {$ifndef POSIX}
 {Gets the state of every 64K block in the 4GB address space}
 procedure GetMemoryMap(var AMemoryMap: TMemoryMap);
 {$endif}
+{Returns the current installation state of the memory manager.}
+function FastMM_GetInstallationState: TFastMM_MemoryManagerInstallationState;
 
 {$ifdef EnableMemoryLeakReporting}
 {Registers expected memory leaks. Returns true on success. The list of leaked
@@ -1798,11 +1861,11 @@ const
   {The pattern used to fill unused memory}
   DebugFillByte = $80;
 {$ifdef 32Bit}
-  DebugFillPattern = $01010101 * Cardinal(DebugFillByte);
+  DebugFillPattern = $01010101 * Cardinal(DebugFillByte); // Default value $80808080
   {The address that is reserved so that accesses to the address of the fill
    pattern will result in an A/V. (Not used under 64-bit, since the upper half
    of the address space is always reserved by the OS.)}
-  DebugReservedAddress = $01010000 * Cardinal(DebugFillByte);
+  DebugReservedAddress = $01010000 * Cardinal(DebugFillByte); // Default value $80800000
 {$else}
   DebugFillPattern = $8080808080808080;
 {$endif}
@@ -2014,9 +2077,9 @@ const
   UnsignedBit = NativeUInt(1);
 
 
-  {According to the Intel 64 and IA-32 Architectures Software Developer’s Manual,
+  {According to the Intel 64 and IA-32 Architectures Software Developers Manual,
   p. 3.7.5 (Specifying an Offset) and 3.7.5.1 (Specifying an Offset in 64-Bit Mode):
-  "Scale factor — A value of 2, 4, or 8 that is multiplied by the index value";
+  "Scale factor - A value of 2, 4, or 8 that is multiplied by the index value";
   The value of MaximumCpuScaleFactor is determined by the processor architecture}
   MaximumCpuScaleFactorPowerOf2 = 3;
   MaximumCpuScaleFactor = UnsignedBit shl MaximumCpuScaleFactorPowerOf2;
@@ -2875,7 +2938,9 @@ function StrLen(const AStr: PAnsiChar): NativeUInt;
 begin
   Result := 0;
   while AStr[Result] <> #0 do
+  begin
     Inc(Result);
+  end;
 end;
 {$else}
  assembler;
@@ -2917,7 +2982,7 @@ end;
 function CPUID_Supported: Boolean;
 {$ifdef 32bit} assembler;
 
-{QUOTE from the Intel 64 and IA-32 Architectures Software Developer’s Manual
+{QUOTE from the Intel 64 and IA-32 Architectures Software Developer's Manual
 
 22.16.1 Using EFLAGS Flags to Distinguish Between 32-Bit IA-32 Processors
 The following bits in the EFLAGS register that can be used to differentiate between the 32-bit IA-32 processors:
@@ -2952,13 +3017,20 @@ end;
 
 
 {Gets the CPUID}
-function GetCPUID(AEax, AEcx: Cardinal): TCpuIdRegisters; assembler;
+procedure GetCPUID(AEax, AEcx: Cardinal; var R: TCpuIdRegisters); assembler;
 {$ifdef 32bit}
 asm
   push ebx
   push esi
-  mov  esi, ecx
-  mov  ecx, edx
+
+{ According to the 32-bit calling convention, the arguments are passed in the
+  following registers:
+  1) eax (first argument, in the GetCPUID function called "AEax" (Cardinal))
+  2) edx (second argument in the GetCPUID function called "ECx" (Cardinal))
+  3) ecx (third argument, the address of the "R" (TCpuIdRegisters) structure)}
+
+  mov  esi, ecx // now the address of the TCpuIdRegisters structure is in esi register
+  mov  ecx, edx // now the value of the second argument is in the ecx register
   {Clear the registers, not really needed, justs for sure/safe}
   xor  ebx, ebx
   xor  edx, edx
@@ -2981,25 +3053,50 @@ asm
 {$ifdef AllowAsmNoframe}
   .noframe
 {$endif}
-  mov r9, rbx
+  mov r9, rbx           // preserve rbx
+
+
+{ According to the 64-bit calling conventions, the arguments are passed in the
+  following registers:
+
+  N Windows Unix   Comment
+  1 rcx     rdi    first argument, in the GetCPUID function called "AEax" (Cardinal)
+  2 rdx     rsi    second argument in the GetCPUID function called "ECx" (Cardinal)
+  3 r8      rdx    third argument, the address of the "R" (TCpuIdRegisters) structure
+
+For Windows, we use Microsoft's Win64 "x64 ABI" calling convention.
+For Unix (Linux), we use "System V AMD64 ABI" calling convention. }
+
+
+// load first argument into eax
+
 {$ifdef unix}
-  mov r10, rdi
+  mov eax, edi
 {$else}
-  mov r10, rcx
+  mov eax, ecx
 {$endif}
+
+// load second argument into ecx
+
+{$ifdef unix}
+  mov ecx, esi
+{$else}
+  mov ecx, edx
+{$endif}
+
+// load third argument into r10
+
+{$ifdef unix}
+  mov r10, rdx
+{$else}
+  mov r10, r8
+{$endif}
+
+
   {Clear the register justs for sure, 32-bit operands in 64-bit mode also clear
   bits 63-32; moreover, CPUID only operates with 32-bit parts of the registers
   even in the 64-bit mode}
-{$ifdef unix}
-  mov eax, esi
-{$else}
-  mov eax, edx
-{$endif}
-{$ifdef unix}
-  mov ecx, edx
-{$else}
-  mov ecx, r8d
-{$endif}
+
   xor ebx, ebx
   xor edx, edx
   cpuid
@@ -3014,9 +3111,13 @@ end;
 {$endif USE_CPUID}
 
 const
+// values for the synchronization variables
   cLockByteAvailable = 107;
   cLockByteLocked    = 109;
   cLockByteFinished  = 113;
+
+// the spin-wait loop count for the "test, test-and-set" technique, details are in the comment section at the beginning of the file
+  cSpinWaitLoopCount = 5000;
 
 {$define UseNormalLoadBeforeAcquireLock}
 
@@ -3090,7 +3191,11 @@ asm
 end;
 {$endif}
 
-{$else SimplifiedInterlockedExchangeByte}
+{$else !SimplifiedInterlockedExchangeByte}
+
+{ The "InterlockedCompareExchangeByte" function is not compiled by default in
+the FastMM4-AVX brach. The implementation below is the old functionality
+of FastMM4 version 4.992. }
 
 {Compare [AAddress], CompareVal:
  If Equal: [AAddress] := NewVal and result = CompareVal
@@ -3111,9 +3216,9 @@ and safer code by cleaning possbile trash}
   movzx eax, al
   movzx edx, dl
 
-{Compare AL with byte ptr [ecx]. If equal, ZF is set and al is
+{Compare AL with byte ptr [ecx]. If equal, ZF is set and DL is
 loaded into byte ptr [ecx]. Else, clear ZF and load byte ptr [ecx] into AL.}
-  lock cmpxchg byte ptr [ecx], dl
+  lock cmpxchg byte ptr [ecx], dl  // cmpxchg also uses AL as an implicit operand
 
 {Clear the registers for safety}
   xor  ecx, ecx
@@ -3123,6 +3228,9 @@ loaded into byte ptr [ecx]. Else, clear ZF and load byte ptr [ecx] into AL.}
   db $F0, $0F, $B0, $11
   {$endif unix}
 {$else 32Bit}
+
+{Microsoft's Win64 "x64 ABI" calling convention.}
+
   {On entry:
     cl = CompareVal
     dl = NewVal
@@ -3133,14 +3241,15 @@ loaded into byte ptr [ecx]. Else, clear ZF and load byte ptr [ecx] into AL.}
   {$endif}
   movzx rax, cl {Remove false dependency on remainig bits of the rax}
   xor rcx, rcx
-  lock cmpxchg byte ptr [r8], dl
+  lock cmpxchg byte ptr [r8], dl  // cmpxchg also uses AL as an implicit operand
   xor rdx, rdx
   xor r8, r8
+
   {$else unix}
 
-{"System V AMD64 ABI" - the de facto standard among  Unix and Unix-like
+{"System V AMD64 ABI" calling convention - the de facto standard among Unix-like
 operating systems. The first four integer or pointer arguments are passed in
-registers RDI, RSI, RDX, RCX; return value is stored in RAX and RDX }
+registers RDI, RSI, RDX, RCX; return value is stored in RAX and RDX.}
 
   {On entry:
     dil = CompareVal
@@ -3148,7 +3257,7 @@ registers RDI, RSI, RDX, RCX; return value is stored in RAX and RDX }
     rdx = AAddress}
 
    movzx rax, dil
-   lock cmpxchg byte ptr [rdx], sil
+   lock cmpxchg byte ptr [rdx], sil  // cmpxchg also uses AL as an implicit operand
    xor rsi, rsi
    xor rdi, rdi
    xor rdx, rdx
@@ -3176,6 +3285,12 @@ begin
   sched_yield;
 end;
 {$else}
+{$ifdef POSIX}
+procedure SwitchToThreadIfSupported;
+begin
+  ThreadSwitch;
+end;
+{$else}
 type
   TSwitchToThread = function: BOOL; stdcall;
 var
@@ -3188,7 +3303,7 @@ begin
     FSwitchToThread;
   end;
 end;
-
+{$endif}
 {$endif}
 
 
@@ -3203,7 +3318,7 @@ asm
   {$endif}
   {$ifdef AsmCodeAlign}.align 4{$endif}
 @Init:
-   mov  r9d, 5000
+   mov  r9d, cSpinWaitLoopCount
    mov  eax, cLockByteLocked
    jmp  @FirstCompare
   {$ifdef AsmCodeAlign}.align 16{$endif}
@@ -3213,23 +3328,24 @@ asm
    jz   @SwitchToThread // for static branch prediction, jump forward means "unlikely"
    db   $F3, $90 // pause
 @FirstCompare:
-   cmp  [rcx], al       // we are using faster, normal load to not consume the resources and only after it is ready, do once again interlocked exchange
+// use the "test, test-and-set" technique, details are in the comment section at the beginning of the file
+   cmp  [rcx], al
    je   @NormalLoadLoop // for static branch prediction, jump backwards means "likely"
    lock xchg [rcx], al
    cmp  al, cLockByteLocked
    je   @DidntLock
    jmp	@Finish
 @SwitchToThread:
-   push  rcx
-   call  SwitchToThreadIfSupported
-   pop   rcx
+   push rcx
+   call SwitchToThreadIfSupported
+   pop  rcx
    jmp  @Init
 @Finish:
 {$else}
    mov  ecx, eax
   {$ifdef AsmCodeAlign}.align 4{$endif}
 @Init:
-   mov  edx, 5000
+   mov  edx, cSpinWaitLoopCount
    mov  eax, cLockByteLocked
    jmp  @FirstCompare
   {$ifdef AsmCodeAlign}.align 16{$endif}
@@ -3246,9 +3362,9 @@ asm
    je   @DidntLock
    jmp	@Finish
 @SwitchToThread:
-   push  ecx
-   call  SwitchToThreadIfSupported
-   pop   ecx
+   push ecx
+   call SwitchToThreadIfSupported
+   pop  ecx
    jmp  @Init
 @Finish:
 {$endif}
@@ -3284,13 +3400,15 @@ begin
         end;
     end;
   {$else}
-    Result := R = cLockByteAvailable;
+    Result := R = CLockByteAvailable;
   {$endif}
 end;
 
-{Use this option - InterlockedRelease - if you need that releasing the lock
-to also use locked store (lock xchg), not just the normal store (mov)}
-{.$define InterlockedRelease}
+
+{ Look for "using normal memory store" in the comment section
+at the beginning of the file for the discussion on releasing locks on data
+structures. You can also define the "InterlockedRelease" option in the
+FastMM4Options.inc file to get the old behaviour of the origina FastMM4. }
 
 procedure ReleaseLockByte(var Target: Byte);
 
@@ -3317,7 +3435,7 @@ begin
      {$ifdef DebugReleaseLockByte}
      R := Target;
      {$endif}
-     Target := cLockByteAvailable;
+     Target := CLockByteAvailable;
   {$endif}
     {$ifdef DebugReleaseLockByte}
     if R <> cLockByteLocked  then
@@ -3395,7 +3513,8 @@ const
 var
   LUnknown: array[0..Length(CUnknown)-1] of AnsiChar = CUnknown;
 begin
-  Result := Min(BufLen, Length(CUnknown));
+  Result := Length(CUnknown);
+  if Result > BufLen then Result := BufLen;
   StrLCopy(Buffer, @LUnknown, Result);
 end;
 
@@ -3667,17 +3786,17 @@ less, by "add rcx", but it pays up later}
   {$else}
                                 add rdi, 60h
                                 add rsi, 60h
- db $C5, $FD, $6F, $47, $A0  // vmovdqa ymm0, [rdi-60h]
- db $C5, $FD, $6F, $4F, $C0  // vmovdqa ymm1, [rdi-40h]
- db $C5, $FD, $6F, $57, $E0  // vmovdqa ymm2, [rdi-20h]
- db $C5, $FD, $6F, $1F       // vmovdqa ymm3, [rdi]
- db $C5, $F9, $6F, $67, $20  // vmovdqa xmm4, [rdi+20h]
+  db $C5, $FD, $6F, $47, $A0 // vmovdqa ymm0, [rdi-60h]
+  db $C5, $FD, $6F, $4F, $C0 // vmovdqa ymm1, [rdi-40h]
+  db $C5, $FD, $6F, $57, $E0 // vmovdqa ymm2, [rdi-20h]
+  db $C5, $FD, $6F, $1F      // vmovdqa ymm3, [rdi]
+  db $C5, $F9, $6F, $67, $20 // vmovdqa xmm4, [rdi+20h]
                                 mov rdi, [rdi+30h]
- db  $C5, $FD, $7F, $46, $A0 // vmovdqa [rsi-60h], ymm0
- db  $C5, $FD, $7F, $4E, $C0 // vmovdqa [rsi-40h], ymm1
- db  $C5, $FD, $7F, $56, $E0 // vmovdqa [rsi-20h], ymm2
- db  $C5, $FD, $7F, $1E      // vmovdqa [rsi],     ymm3
- db  $C5, $F9, $7F, $66, $20 // vmovdqa [rsi+20h], xmm4
+  db $C5, $FD, $7F, $46, $A0 // vmovdqa [rsi-60h], ymm0
+  db $C5, $FD, $7F, $4E, $C0 // vmovdqa [rsi-40h], ymm1
+  db $C5, $FD, $7F, $56, $E0 // vmovdqa [rsi-20h], ymm2
+  db $C5, $FD, $7F, $1E      // vmovdqa [rsi],     ymm3
+  db $C5, $F9, $7F, $66, $20 // vmovdqa [rsi+20h], xmm4
                                 mov [rsi+30h], rdi
   {$endif}
 {See the comment at Move120AVX1 on why we are using that many ymm registers}
@@ -3695,54 +3814,54 @@ asm
   .noframe
   {$endif}
 
-  db $C5, $F8, $77                // vzeroupper
+  db $C5, $F8, $77           // vzeroupper
 
   {$ifndef unix}
 
 {We add to the source and destination registers to allow all future offsets
 be in range -127..+127, see explanation at the Move152AVX1 routine}
 
-                                     add rcx, 60h
-                                     add rdx, 60h
-  db $C5, $FD, $6F, $41, $A0      // vmovdqa ymm0, [rcx-60h]
-  db $C5, $FD, $6F, $49, $C0      // vmovdqa ymm1, [rcx-40h]
-  db $C5, $FD, $6F, $51, $E0      // vmovdqa ymm2, [rcx-20h]
-  db $C5, $FD, $6F, $19           // vmovdqa ymm3, [rcx]
-  db $C5, $FD, $6F, $61, $20      // vmovdqa ymm4, [rcx+20h]
-  db $C5, $F9, $6F, $69, $40      // vmovdqa xmm5, [rcx+40h]
-                                     mov rcx, [rcx+50h]
-  db $C5, $FD, $7F, $42, $A0      // vmovdqa [rdx-60h], ymm0
-  db $C5, $FD, $7F, $4A, $C0      // vmovdqa [rdx-40h], ymm1
-  db $C5, $FD, $7F, $52, $E0      // vmovdqa [rdx-20h], ymm2
-  db $C5, $FD, $7F, $1A           // vmovdqa [rdx],     ymm3
-  db $C5, $FD, $7F, $62, $20      // vmovdqa [rdx+20h], ymm4
-  db $C5, $F9, $7F, $6A, $40      // vmovdqa [rdx+40h], xmm5
-                                     mov [rdx+50h], rcx
+                                add rcx, 60h
+                                add rdx, 60h
+  db $C5, $FD, $6F, $41, $A0 // vmovdqa ymm0, [rcx-60h]
+  db $C5, $FD, $6F, $49, $C0 // vmovdqa ymm1, [rcx-40h]
+  db $C5, $FD, $6F, $51, $E0 // vmovdqa ymm2, [rcx-20h]
+  db $C5, $FD, $6F, $19      // vmovdqa ymm3, [rcx]
+  db $C5, $FD, $6F, $61, $20 // vmovdqa ymm4, [rcx+20h]
+  db $C5, $F9, $6F, $69, $40 // vmovdqa xmm5, [rcx+40h]
+                                mov rcx, [rcx+50h]
+  db $C5, $FD, $7F, $42, $A0 // vmovdqa [rdx-60h], ymm0
+  db $C5, $FD, $7F, $4A, $C0 // vmovdqa [rdx-40h], ymm1
+  db $C5, $FD, $7F, $52, $E0 // vmovdqa [rdx-20h], ymm2
+  db $C5, $FD, $7F, $1A      // vmovdqa [rdx],     ymm3
+  db $C5, $FD, $7F, $62, $20 // vmovdqa [rdx+20h], ymm4
+  db $C5, $F9, $7F, $6A, $40 // vmovdqa [rdx+40h], xmm5
+                                mov [rdx+50h], rcx
   {$else}
-                                     add rdi, 60h
-                                     add rsi, 60h
-  db $C5, $FD, $6F, $47, $A0      // vmovdqa ymm0, [rdi-60h]
-  db $C5, $FD, $6F, $4F, $C0      // vmovdqa ymm1, [rdi-40h]
-  db $C5, $FD, $6F, $57, $E0      // vmovdqa ymm2, [rdi-20h]
-  db $C5, $FD, $6F, $1F           // vmovdqa ymm3, [rdi]
-  db $C5, $FD, $6F, $67, $20      // vmovdqa ymm4, [rdi+20h]
-  db $C5, $F9, $6F, $6F, $40      // vmovdqa xmm5, [rdi+40h]
-                                     mov rdi, [rdi+50h]
-  db $C5, $FD, $7F, $46, $A0      // vmovdqa [rsi-60h], ymm0
-  db $C5, $FD, $7F, $4E, $C0      // vmovdqa [rsi-40h], ymm1
-  db $C5, $FD, $7F, $56, $E0      // vmovdqa [rsi-20h], ymm2
-  db $C5, $FD, $7F, $1E           // vmovdqa [rsi],     ymm3
-  db $C5, $FD, $7F, $66, $20      // vmovdqa [rsi+20h], ymm4
-  db $C5, $F9, $7F, $6E, $40      // vmovdqa [rsi+40h], xmm5
-                                     mov [rsi+50h], rdi
+                                add rdi, 60h
+                                add rsi, 60h
+  db $C5, $FD, $6F, $47, $A0 // vmovdqa ymm0, [rdi-60h]
+  db $C5, $FD, $6F, $4F, $C0 // vmovdqa ymm1, [rdi-40h]
+  db $C5, $FD, $6F, $57, $E0 // vmovdqa ymm2, [rdi-20h]
+  db $C5, $FD, $6F, $1F      // vmovdqa ymm3, [rdi]
+  db $C5, $FD, $6F, $67, $20 // vmovdqa ymm4, [rdi+20h]
+  db $C5, $F9, $6F, $6F, $40 // vmovdqa xmm5, [rdi+40h]
+                                mov rdi, [rdi+50h]
+  db $C5, $FD, $7F, $46, $A0 // vmovdqa [rsi-60h], ymm0
+  db $C5, $FD, $7F, $4E, $C0 // vmovdqa [rsi-40h], ymm1
+  db $C5, $FD, $7F, $56, $E0 // vmovdqa [rsi-20h], ymm2
+  db $C5, $FD, $7F, $1E      // vmovdqa [rsi],     ymm3
+  db $C5, $FD, $7F, $66, $20 // vmovdqa [rsi+20h], ymm4
+  db $C5, $F9, $7F, $6E, $40 // vmovdqa [rsi+40h], xmm5
+                                mov [rsi+50h], rdi
   {$endif}
-  db $C5, $FC, $57, $C0           // vxorps ymm0,ymm0,ymm0
-  db $C5, $F4, $57, $C9           // vxorps ymm1,ymm1,ymm1
-  db $C5, $EC, $57, $D2           // vxorps ymm2,ymm2,ymm2
-  db $C5, $E4, $57, $DB           // vxorps ymm3,ymm3,ymm3
-  db $C5, $DC, $57, $E4           // vxorps ymm4,ymm4,ymm4
-  db $C5, $D0, $57, $ED           // vxorps xmm5,xmm5,xmm5
-  db $C5, $F8, $77                // vzeroupper
+  db $C5, $FC, $57, $C0      // vxorps ymm0,ymm0,ymm0
+  db $C5, $F4, $57, $C9      // vxorps ymm1,ymm1,ymm1
+  db $C5, $EC, $57, $D2      // vxorps ymm2,ymm2,ymm2
+  db $C5, $E4, $57, $DB      // vxorps ymm3,ymm3,ymm3
+  db $C5, $DC, $57, $E4      // vxorps ymm4,ymm4,ymm4
+  db $C5, $D0, $57, $ED      // vxorps xmm5,xmm5,xmm5
+  db $C5, $F8, $77           // vzeroupper
 end;
 
 procedure Move216AVX1(const ASource; var ADest; ACount: NativeInt); {$ifdef fpc64bit} assembler; nostackframe; {$endif}
@@ -3751,73 +3870,78 @@ asm
   .noframe
   {$endif}
 
-  db $C5, $F8, $77                // vzeroupper
+  db $C5, $F8, $77           // vzeroupper
 
   {$ifndef unix}
-                                   add rcx, 60h
-                                   add rdx, 60h
-  db $C5, $FD, $6F, $41, $A0    // vmovdqa ymm0, [rcx-60h]
-  db $C5, $FD, $6F, $49, $C0    // vmovdqa ymm1, [rcx-40h]
-  db $C5, $FD, $6F, $51, $E0    // vmovdqa ymm2, [rcx-20h]
-  db $C5, $FD, $6F, $19         // vmovdqa ymm3, [rcx]
-  db $C5, $FD, $6F, $61, $20    // vmovdqa ymm4, [rcx+20h]
-  db $C5, $FD, $6F, $69, $40    // vmovdqa ymm5, [rcx+40h]
+                                add rcx, 60h
+                                add rdx, 60h
+  db $C5, $FD, $6F, $41, $A0 // vmovdqa ymm0, [rcx-60h]
+  db $C5, $FD, $6F, $49, $C0 // vmovdqa ymm1, [rcx-40h]
+  db $C5, $FD, $6F, $51, $E0 // vmovdqa ymm2, [rcx-20h]
+  db $C5, $FD, $6F, $19      // vmovdqa ymm3, [rcx]
+  db $C5, $FD, $6F, $61, $20 // vmovdqa ymm4, [rcx+20h]
+  db $C5, $FD, $6F, $69, $40 // vmovdqa ymm5, [rcx+40h]
 
-{The xmm6/ymm6 register is nonvolatile, according to Microsoft's
-Win64 calling convention. Since we cannot use xmm6, we use general-purpose
+{The xmm6/ymm6 register is nonvolatile, according to
+Microsoft's x64 calling convention, used for Win64,
+denoted "The x64 Application Binary Interface (ABI)", or, briefly, "x64 ABI".
+Since we cannot use xmm6, we use general-purpose
 64-bit registers to copy remaining data.
+
+According to Microsoft, "The x64 ABI considers registers RBX, RBP, RDI, RSI, RSP, R12, R13, R14, R15, and XMM6-XMM15 nonvolatile. They must be saved and restored by a function that uses them"
+
 We are using that many ymm registers, not just two of them in a sequence,
 because our routines allow overlapped moves (although it is not needed for
 FastMM4 realloc) - see the comment at Move120AVX1 on why we are using that
 many ymm registers.}
 
 
-                                   mov r9, [rcx+60h]
-                                   mov r10, [rcx+68h]
-                                   mov r11, [rcx+70h]
-  db $C5, $FD, $7F, $42, $A0    // vmovdqa [rdx-60h], ymm0
-  db $C5, $FD, $7F, $4A, $C0    // vmovdqa [rdx-40h], ymm1
-  db $C5, $FD, $7F, $52, $E0    // vmovdqa [rdx-20h], ymm2
-  db $C5, $FD, $7F, $1A         // vmovdqa [rdx],     ymm3
-  db $C5, $FD, $7F, $62, $20    // vmovdqa [rdx+20h], ymm4
-  db $C5, $FD, $7F, $6A, $40    // vmovdqa [rdx+40h], ymm5
-                                   mov [rdx+60h], r9
-                                   mov [rdx+68h], r10
-                                   mov [rdx+70h], r11
+                                mov r9, [rcx+60h]
+                                mov r10, [rcx+68h]
+                                mov r11, [rcx+70h]
+  db $C5, $FD, $7F, $42, $A0 // vmovdqa [rdx-60h], ymm0
+  db $C5, $FD, $7F, $4A, $C0 // vmovdqa [rdx-40h], ymm1
+  db $C5, $FD, $7F, $52, $E0 // vmovdqa [rdx-20h], ymm2
+  db $C5, $FD, $7F, $1A      // vmovdqa [rdx],     ymm3
+  db $C5, $FD, $7F, $62, $20 // vmovdqa [rdx+20h], ymm4
+  db $C5, $FD, $7F, $6A, $40 // vmovdqa [rdx+40h], ymm5
+                                mov [rdx+60h], r9
+                                mov [rdx+68h], r10
+                                mov [rdx+70h], r11
   {$else}
-                                   add rdi, 60h
-                                   add rsi, 60h
-  db $C5, $FD, $6F, $41, $A0    // vmovdqa ymm0, [rdi-60h]
-  db $C5, $FD, $6F, $49, $C0    // vmovdqa ymm1, [rdi-40h]
-  db $C5, $FD, $6F, $51, $E0    // vmovdqa ymm2, [rdi-20h]
-  db $C5, $FD, $6F, $19         // vmovdqa ymm3, [rdi]
-  db $C5, $FD, $6F, $61, $20    // vmovdqa ymm4, [rdi+20h]
-  db $C5, $FD, $6F, $69, $40    // vmovdqa ymm5, [rdi+40h]
+                                add rdi, 60h
+                                add rsi, 60h
+  db $C5, $FD, $6F, $47, $A0 // vmovdqa ymm0, [rdi-60h]
+  db $C5, $FD, $6F, $4F, $C0 // vmovdqa ymm1, [rdi-40h]
+  db $C5, $FD, $6F, $57, $E0 // vmovdqa ymm2, [rdi-20h]
+  db $C5, $FD, $6F, $1F      // vmovdqa ymm3, [rdi]
+  db $C5, $FD, $6F, $67, $20 // vmovdqa ymm4, [rdi+20h]
+  db $C5, $FD, $6F, $6F, $40 // vmovdqa ymm5, [rdi+40h]
 
 {Although, under unix, we can use xmm6(ymm6) and xmm7 (ymm7), here we mimic
 the Win64 code, thus use up to ymm5, and use general-purpose 64-bit registers
 to copy remaining data - 24 bytes, which is still smaller than the full ymm
 register (32 bytes)}
-                                   mov r9,  [rdi+60h]
-                                   mov r10, [rdi+68h]
-                                   mov r11, [rdi+70h]
-  db $C5, $FD, $7F, $42, $A0    // vmovdqa [rsi-60h], ymm0
-  db $C5, $FD, $7F, $4A, $C0    // vmovdqa [rsi-40h], ymm1
-  db $C5, $FD, $7F, $52, $E0    // vmovdqa [rsi-20h], ymm2
-  db $C5, $FD, $7F, $1A         // vmovdqa [rsi],     ymm3
-  db $C5, $FD, $7F, $62, $20    // vmovdqa [rsi+20h], ymm4
-  db $C5, $FD, $7F, $6A, $40    // vmovdqa [rsi+40h], ymm5
-                                   mov [rsi+60h], r9
-                                   mov [rsi+68h], r10
-                                   mov [rsi+70h], r11
+                                mov r9,  [rdi+60h]
+                                mov r10, [rdi+68h]
+                                mov r11, [rdi+70h]
+  db $C5, $FD, $7F, $46, $A0 // vmovdqa [rsi-60h], ymm0
+  db $C5, $FD, $7F, $4E, $C0 // vmovdqa [rsi-40h], ymm1
+  db $C5, $FD, $7F, $56, $E0 // vmovdqa [rsi-20h], ymm2
+  db $C5, $FD, $7F, $1E      // vmovdqa [rsi],     ymm3
+  db $C5, $FD, $7F, $66, $20 // vmovdqa [rsi+20h], ymm4
+  db $C5, $FD, $7F, $6E, $40 // vmovdqa [rsi+40h], ymm5
+                                mov [rsi+60h], r9
+                                mov [rsi+68h], r10
+                                mov [rsi+70h], r11
   {$endif}
-  db $C5, $FC, $57, $C0         // vxorps ymm0,ymm0,ymm0
-  db $C5, $F4, $57, $C9         // vxorps ymm1,ymm1,ymm1
-  db $C5, $EC, $57, $D2         // vxorps ymm2,ymm2,ymm2
-  db $C5, $E4, $57, $DB         // vxorps ymm3,ymm3,ymm3
-  db $C5, $DC, $57, $E4         // vxorps ymm4,ymm4,ymm4
-  db $C5, $D4, $57, $ED         // vxorps ymm5,ymm5,ymm5
-  db $C5, $F8, $77              // vzeroupper
+  db $C5, $FC, $57, $C0      // vxorps ymm0,ymm0,ymm0
+  db $C5, $F4, $57, $C9      // vxorps ymm1,ymm1,ymm1
+  db $C5, $EC, $57, $D2      // vxorps ymm2,ymm2,ymm2
+  db $C5, $E4, $57, $DB      // vxorps ymm3,ymm3,ymm3
+  db $C5, $DC, $57, $E4      // vxorps ymm4,ymm4,ymm4
+  db $C5, $D4, $57, $ED      // vxorps ymm5,ymm5,ymm5
+  db $C5, $F8, $77           // vzeroupper
 end;
 {$endif DisableAVX1}
 
@@ -3981,46 +4105,46 @@ asm
   {$ifdef AllowAsmNoframe}
   .noframe
   {$endif}
-                                     add rcx, 60h
-                                     add rdx, 60h
-  db $C5, $FD, $6F, $41, $A0      // vmovdqa ymm0, [rcx-60h]
-  db $C5, $FD, $6F, $49, $C0      // vmovdqa ymm1, [rcx-40h]
-  db $C5, $FD, $6F, $51, $E0      // vmovdqa ymm2, [rcx-20h]
-  db $C5, $FD, $6F, $19           // vmovdqa ymm3, [rcx]
-  db $C5, $FD, $6F, $61, $20      // vmovdqa ymm4, [rcx+20h]
-  db $C5, $F9, $6F, $69, $40      // vmovdqa xmm5, [rcx+40h]
-                                     mov rcx, [rcx+50h]
-  db $C5, $FD, $7F, $42, $A0      // vmovdqa [rdx-60h], ymm0
-  db $C5, $FD, $7F, $4A, $C0      // vmovdqa [rdx-40h], ymm1
-  db $C5, $FD, $7F, $52, $E0      // vmovdqa [rdx-20h], ymm2
-  db $C5, $FD, $7F, $1A           // vmovdqa [rdx],     ymm3
-  db $C5, $FD, $7F, $62, $20      // vmovdqa [rdx+20h], ymm4
-  db $C5, $F9, $7F, $6A, $40      // vmovdqa [rdx+40h], xmm5
+                                add rcx, 60h
+                                add rdx, 60h
+  db $C5, $FD, $6F, $41, $A0 // vmovdqa ymm0, [rcx-60h]
+  db $C5, $FD, $6F, $49, $C0 // vmovdqa ymm1, [rcx-40h]
+  db $C5, $FD, $6F, $51, $E0 // vmovdqa ymm2, [rcx-20h]
+  db $C5, $FD, $6F, $19      // vmovdqa ymm3, [rcx]
+  db $C5, $FD, $6F, $61, $20 // vmovdqa ymm4, [rcx+20h]
+  db $C5, $F9, $6F, $69, $40 // vmovdqa xmm5, [rcx+40h]
+                                mov rcx, [rcx+50h]
+  db $C5, $FD, $7F, $42, $A0 // vmovdqa [rdx-60h], ymm0
+  db $C5, $FD, $7F, $4A, $C0 // vmovdqa [rdx-40h], ymm1
+  db $C5, $FD, $7F, $52, $E0 // vmovdqa [rdx-20h], ymm2
+  db $C5, $FD, $7F, $1A      // vmovdqa [rdx],     ymm3
+  db $C5, $FD, $7F, $62, $20 // vmovdqa [rdx+20h], ymm4
+  db $C5, $F9, $7F, $6A, $40 // vmovdqa [rdx+40h], xmm5
   mov [rdx+50h],rcx
   {$else}
-                                     add rdi, 60h
-                                     add rsi, 60h
-  db $C5, $FD, $6F, $47, $A0      // vmovdqa ymm0, [rdi-60h]
-  db $C5, $FD, $6F, $4F, $C0      // vmovdqa ymm1, [rdi-40h]
-  db $C5, $FD, $6F, $57, $E0      // vmovdqa ymm2, [rdi-20h]
-  db $C5, $FD, $6F, $1F           // vmovdqa ymm3, [rdi]
-  db $C5, $FD, $6F, $67, $20      // vmovdqa ymm4, [rdi+20h]
-  db $C5, $F9, $6F, $6F, $40      // vmovdqa xmm5, [rdi+40h]
-                                     mov rdi, [rdi+50h]
-  db $C5, $FD, $7F, $46, $A0      // vmovdqa [rsi-60h], ymm0
-  db $C5, $FD, $7F, $4E, $C0      // vmovdqa [rsi-40h], ymm1
-  db $C5, $FD, $7F, $56, $E0      // vmovdqa [rsi-20h], ymm2
-  db $C5, $FD, $7F, $1E           // vmovdqa [rsi],     ymm3
-  db $C5, $FD, $7F, $66, $20      // vmovdqa [rsi+20h], ymm4
-  db $C5, $F9, $7F, $6E, $40      // vmovdqa [rsi+40h], xmm5
-                                     mov [rsi+50h], rdi
+                                add rdi, 60h
+                                add rsi, 60h
+  db $C5, $FD, $6F, $47, $A0 // vmovdqa ymm0, [rdi-60h]
+  db $C5, $FD, $6F, $4F, $C0 // vmovdqa ymm1, [rdi-40h]
+  db $C5, $FD, $6F, $57, $E0 // vmovdqa ymm2, [rdi-20h]
+  db $C5, $FD, $6F, $1F      // vmovdqa ymm3, [rdi]
+  db $C5, $FD, $6F, $67, $20 // vmovdqa ymm4, [rdi+20h]
+  db $C5, $F9, $6F, $6F, $40 // vmovdqa xmm5, [rdi+40h]
+                                mov rdi, [rdi+50h]
+  db $C5, $FD, $7F, $46, $A0 // vmovdqa [rsi-60h], ymm0
+  db $C5, $FD, $7F, $4E, $C0 // vmovdqa [rsi-40h], ymm1
+  db $C5, $FD, $7F, $56, $E0 // vmovdqa [rsi-20h], ymm2
+  db $C5, $FD, $7F, $1E      // vmovdqa [rsi],     ymm3
+  db $C5, $FD, $7F, $66, $20 // vmovdqa [rsi+20h], ymm4
+  db $C5, $F9, $7F, $6E, $40 // vmovdqa [rsi+40h], xmm5
+                                mov [rsi+50h], rdi
   {$endif}
-  db $C5, $FD, $EF, $C0           // vpxor ymm0,ymm0,ymm0
-  db $C5, $F5, $EF, $C9           // vpxor ymm1,ymm1,ymm1
-  db $C5, $ED, $EF, $D2           // vpxor ymm2,ymm2,ymm2
-  db $C5, $E5, $EF, $DB           // vpxor ymm3,ymm3,ymm3
-  db $C5, $DD, $EF, $E4           // vpxor ymm4,ymm4,ymm4
-  db $C5, $D1, $EF, $ED           // vpxor xmm5,xmm5,xmm5
+  db $C5, $FD, $EF, $C0      // vpxor ymm0,ymm0,ymm0
+  db $C5, $F5, $EF, $C9      // vpxor ymm1,ymm1,ymm1
+  db $C5, $ED, $EF, $D2      // vpxor ymm2,ymm2,ymm2
+  db $C5, $E5, $EF, $DB      // vpxor ymm3,ymm3,ymm3
+  db $C5, $DD, $EF, $E4      // vpxor ymm4,ymm4,ymm4
+  db $C5, $D1, $EF, $ED      // vpxor xmm5,xmm5,xmm5
 end;
 
 procedure Move216AVX2(const ASource; var ADest; ACount: NativeInt); {$ifdef fpc64bit} assembler; nostackframe; {$endif}
@@ -4029,57 +4153,64 @@ asm
   {$ifdef AllowAsmNoframe}
   .noframe
   {$endif}
-                                   add rcx, 60h
-                                   add rdx, 60h
-  db $C5, $FD, $6F, $41, $A0    // vmovdqa ymm0, [rcx-60h]
-  db $C5, $FD, $6F, $49, $C0    // vmovdqa ymm1, [rcx-40h]
-  db $C5, $FD, $6F, $51, $E0    // vmovdqa ymm2, [rcx-20h]
-  db $C5, $FD, $6F, $19         // vmovdqa ymm3, [rcx]
-  db $C5, $FD, $6F, $61, $20    // vmovdqa ymm4, [rcx+20h]
-  db $C5, $FD, $6F, $69, $40    // vmovdqa ymm5, [rcx+40h]
+                                add rcx, 60h
+                                add rdx, 60h
+  db $C5, $FD, $6F, $41, $A0 // vmovdqa ymm0, [rcx-60h]
+  db $C5, $FD, $6F, $49, $C0 // vmovdqa ymm1, [rcx-40h]
+  db $C5, $FD, $6F, $51, $E0 // vmovdqa ymm2, [rcx-20h]
+  db $C5, $FD, $6F, $19      // vmovdqa ymm3, [rcx]
+  db $C5, $FD, $6F, $61, $20 // vmovdqa ymm4, [rcx+20h]
+  db $C5, $FD, $6F, $69, $40 // vmovdqa ymm5, [rcx+40h]
   mov r9, [rcx+60h]
   mov r10, [rcx+68h]
   mov r11, [rcx+70h]
-  db $C5, $FD, $7F, $42, $A0    // vmovdqa [rdx-60h], ymm0
-  db $C5, $FD, $7F, $4A, $C0    // vmovdqa [rdx-40h], ymm1
-  db $C5, $FD, $7F, $52, $E0    // vmovdqa [rdx-20h], ymm2
-  db $C5, $FD, $7F, $1A         // vmovdqa [rdx],     ymm3
-  db $C5, $FD, $7F, $62, $20    // vmovdqa [rdx+20h], ymm4
-  db $C5, $FD, $7F, $6A, $40    // vmovdqa [rdx+40h], ymm5
+  db $C5, $FD, $7F, $42, $A0 // vmovdqa [rdx-60h], ymm0
+  db $C5, $FD, $7F, $4A, $C0 // vmovdqa [rdx-40h], ymm1
+  db $C5, $FD, $7F, $52, $E0 // vmovdqa [rdx-20h], ymm2
+  db $C5, $FD, $7F, $1A      // vmovdqa [rdx],     ymm3
+  db $C5, $FD, $7F, $62, $20 // vmovdqa [rdx+20h], ymm4
+  db $C5, $FD, $7F, $6A, $40 // vmovdqa [rdx+40h], ymm5
   mov [rdx+60h], r9
   mov [rdx+68h], r10
   mov [rdx+70h], r11
   {$else}
-                                   add rdi, 60h
-                                   add rsi, 60h
-  db $C5, $FD, $6F, $41, $A0    // vmovdqa ymm0, [rdi-60h]
-  db $C5, $FD, $6F, $49, $C0    // vmovdqa ymm1, [rdi-40h]
-  db $C5, $FD, $6F, $51, $E0    // vmovdqa ymm2, [rdi-20h]
-  db $C5, $FD, $6F, $19         // vmovdqa ymm3, [rdi]
-  db $C5, $FD, $6F, $61, $20    // vmovdqa ymm4, [rdi+20h]
-  db $C5, $FD, $6F, $69, $40    // vmovdqa ymm5, [rdi+40h]
+                                add rdi, 60h
+                                add rsi, 60h
+  db $C5, $FD, $6F, $47, $A0 // vmovdqa ymm0, [rdi-60h]
+  db $C5, $FD, $6F, $4F, $C0 // vmovdqa ymm1, [rdi-40h]
+  db $C5, $FD, $6F, $57, $E0 // vmovdqa ymm2, [rdi-20h]
+  db $C5, $FD, $6F, $1F      // vmovdqa ymm3, [rdi]
+  db $C5, $FD, $6F, $67, $20 // vmovdqa ymm4, [rdi+20h]
+  db $C5, $FD, $6F, $6F, $40 // vmovdqa ymm5, [rdi+40h]
 
-{Although, under unix, we can use xmm6(ymm6) and xmm7 (ymm7), here we mimic
-the Win64 code, see the comment at Move216AVX1 on this}
-                                   mov r9,  [rdi+60h]
-                                   mov r10, [rdi+68h]
-                                   mov r11, [rdi+70h]
-  db $C5, $FD, $7F, $42, $A0    // vmovdqa [rsi-60h], ymm0
-  db $C5, $FD, $7F, $4A, $C0    // vmovdqa [rsi-40h], ymm1
-  db $C5, $FD, $7F, $52, $E0    // vmovdqa [rsi-20h], ymm2
-  db $C5, $FD, $7F, $1A         // vmovdqa [rsi],     ymm3
-  db $C5, $FD, $7F, $62, $20    // vmovdqa [rsi+20h], ymm4
-  db $C5, $FD, $7F, $6A, $40    // vmovdqa [rsi+40h], ymm5
-                                   mov [rsi+60h], r9
-                                   mov [rsi+68h], r10
-                                   mov [rsi+70h], r11
+{
+
+Although, under unix, we can use xmm6(ymm6) and xmm7 (ymm7), here we mimic the Win64 code, see the comment at Move216AVX1 on this.
+
+We cannot use xmm6(ymm6) and xmm7 (ymm7) under Windows due to the calling convention.
+
+According to Microsoft, "The registers RBX, RBP, RDI, RSI, RSP, R12, R13, R14, R15, and XMM6-15 are considered nonvolatile and must be saved and restored by a function that uses them."
+
+}
+                                mov r9,  [rdi+60h]
+                                mov r10, [rdi+68h]
+                                mov r11, [rdi+70h]
+  db $C5, $FD, $7F, $46, $A0 // vmovdqa [rsi-60h], ymm0
+  db $C5, $FD, $7F, $4E, $C0 // vmovdqa [rsi-40h], ymm1
+  db $C5, $FD, $7F, $56, $E0 // vmovdqa [rsi-20h], ymm2
+  db $C5, $FD, $7F, $1E      // vmovdqa [rsi],     ymm3
+  db $C5, $FD, $7F, $66, $20 // vmovdqa [rsi+20h], ymm4
+  db $C5, $FD, $7F, $6E, $40 // vmovdqa [rsi+40h], ymm5
+                                mov [rsi+60h], r9
+                                mov [rsi+68h], r10
+                                mov [rsi+70h], r11
   {$endif}
-  db $C5, $FD, $EF, $C0         // vpxor ymm0,ymm0,ymm0
-  db $C5, $F5, $EF, $C9         // vpxor ymm1,ymm1,ymm1
-  db $C5, $ED, $EF, $D2         // vpxor ymm2,ymm2,ymm2
-  db $C5, $E5, $EF, $DB         // vpxor ymm3,ymm3,ymm3
-  db $C5, $DD, $EF, $E4         // vpxor ymm4,ymm4,ymm4
-  db $C5, $D5, $EF, $ED         // vpxor ymm5,ymm5,ymm5
+  db $C5, $FD, $EF, $C0      // vpxor ymm0,ymm0,ymm0
+  db $C5, $F5, $EF, $C9      // vpxor ymm1,ymm1,ymm1
+  db $C5, $ED, $EF, $D2      // vpxor ymm2,ymm2,ymm2
+  db $C5, $E5, $EF, $DB      // vpxor ymm3,ymm3,ymm3
+  db $C5, $DD, $EF, $E4      // vpxor ymm4,ymm4,ymm4
+  db $C5, $D5, $EF, $ED      // vpxor ymm5,ymm5,ymm5
 end;
 {$endif DisableAVX2}
 
@@ -4087,6 +4218,8 @@ end;
 {$ifdef unix}
 AVX-512 is not yet implemented for UNIX
 {$else unix}
+procedure Move24AVX512(const ASource; var ADest; ACount: NativeInt); external;
+procedure Move56AVX512(const ASource; var ADest; ACount: NativeInt); external;
 procedure Move88AVX512(const ASource; var ADest; ACount: NativeInt); external;
 procedure Move120AVX512(const ASource; var ADest; ACount: NativeInt); external;
 procedure Move152AVX512(const ASource; var ADest; ACount: NativeInt); external;
@@ -4096,9 +4229,9 @@ procedure Move248AVX512(const ASource; var ADest; ACount: NativeInt); external;
 procedure Move280AVX512(const ASource; var ADest; ACount: NativeInt); external;
 procedure Move312AVX512(const ASource; var ADest; ACount: NativeInt); external;
 procedure Move344AVX512(const ASource; var ADest; ACount: NativeInt); external;
-{$IFNDEF DisableMoveX32LpAvx512}
+{$ifndef DisableMoveX32LpAvx512}
 procedure MoveX32LpAvx512WithErms(const ASource; var ADest; ACount: NativeInt); external;
-{$ENDIF}
+{$endif}
 
 { FastMM4_AVX512.obj file is needed to enable AVX-512 code for FastMM4-AVX.
   Use "nasm.exe -Ox -f win64 FastMM4_AVX512.asm" to compile this .obj file.
@@ -4701,14 +4834,14 @@ asm
   {$ifdef AsmCodeAlign}.align 16{$endif}
 
 @AvxBigMoveAlignedAll:
-  db $C4, $C1, $7D, $6F, $04, $08          // vmovdqa ymm0, ymmword ptr [rcx+r8]
-  db $C4, $C1, $7D, $6F, $4C, $08, $20     // vmovdqa ymm1, ymmword ptr [rcx+r8+20h]
-  db $C4, $C1, $7D, $6F, $54, $08, $40     // vmovdqa ymm2, ymmword ptr [rcx+r8+40h]
-  db $C4, $C1, $7D, $6F, $5C, $08, $60     // vmovdqa ymm3, ymmword ptr [rcx+r8+60h]
-  db $C4, $C1, $7D, $7F, $04, $10          // vmovdqa ymmword ptr [rdx+r8], ymm0
-  db $C4, $C1, $7D, $7F, $4C, $10, $20     // vmovdqa ymmword ptr [rdx+r8+20h], ymm1
-  db $C4, $C1, $7D, $7F, $54, $10, $40     // vmovdqa ymmword ptr [rdx+r8+40h], ymm2
-  db $C4, $C1, $7D, $7F, $5C, $10, $60     // vmovdqa ymmword ptr [rdx+r8+60h], ymm3
+  db $C4, $C1, $7D, $6F, $04, $08      // vmovdqa ymm0, ymmword ptr [rcx+r8]
+  db $C4, $C1, $7D, $6F, $4C, $08, $20 // vmovdqa ymm1, ymmword ptr [rcx+r8+20h]
+  db $C4, $C1, $7D, $6F, $54, $08, $40 // vmovdqa ymm2, ymmword ptr [rcx+r8+40h]
+  db $C4, $C1, $7D, $6F, $5C, $08, $60 // vmovdqa ymm3, ymmword ptr [rcx+r8+60h]
+  db $C4, $C1, $7D, $7F, $04, $10      // vmovdqa ymmword ptr [rdx+r8], ymm0
+  db $C4, $C1, $7D, $7F, $4C, $10, $20 // vmovdqa ymmword ptr [rdx+r8+20h], ymm1
+  db $C4, $C1, $7D, $7F, $54, $10, $40 // vmovdqa ymmword ptr [rdx+r8+40h], ymm2
+  db $C4, $C1, $7D, $7F, $5C, $10, $60 // vmovdqa ymmword ptr [rdx+r8+60h], ymm3
   add r8, 128
   cmp r8, -128
   jl  @AvxBigMoveAlignedAll
@@ -4719,17 +4852,17 @@ asm
 
 @MoveLoopAvx:
   {Move a 16 byte block}
-  db $C4, $A1, $79, $6F, $04, $01  // vmovdqa xmm0,xmmword ptr [rcx+r8]
-  db $C4, $A1, $79, $7F, $04, $02  // vmovdqa xmmword ptr [rdx+r8],xmm0
+  db $C4, $A1, $79, $6F, $04, $01      // vmovdqa xmm0,xmmword ptr [rcx+r8]
+  db $C4, $A1, $79, $7F, $04, $02      // vmovdqa xmmword ptr [rdx+r8],xmm0
   {Are there another 16 bytes to move?}
   add r8, 16
   js @MoveLoopAvx
 
-  db $C5, $FC, $57, $C0          // vxorps      ymm0,ymm0,ymm0
-  db $C5, $F4, $57, $C9          // vxorps      ymm1,ymm1,ymm1
-  db $C5, $EC, $57, $D2          // vxorps      ymm2,ymm2,ymm2
-  db $C5, $E4, $57, $DB          // vxorps      ymm3,ymm3,ymm3
-  db $C5, $F8, $77               // vzeroupper
+  db $C5, $FC, $57, $C0                // vxorps      ymm0,ymm0,ymm0
+  db $C5, $F4, $57, $C9                // vxorps      ymm1,ymm1,ymm1
+  db $C5, $EC, $57, $D2                // vxorps      ymm2,ymm2,ymm2
+  db $C5, $E4, $57, $DB                // vxorps      ymm3,ymm3,ymm3
+  db $C5, $F8, $77                     // vzeroupper
 
   {$ifdef AsmCodeAlign}.align 8{$endif}
 
@@ -4763,14 +4896,14 @@ asm
   {$ifdef AsmCodeAlign}.align 16{$endif}
 
 @AvxBigMoveAlignedAll:
-  db $C4, $C1, $7D, $6F, $04, $08          // vmovdqa ymm0, ymmword ptr [rcx+r8]
-  db $C4, $C1, $7D, $6F, $4C, $08, $20     // vmovdqa ymm1, ymmword ptr [rcx+r8+20h]
-  db $C4, $C1, $7D, $6F, $54, $08, $40     // vmovdqa ymm2, ymmword ptr [rcx+r8+40h]
-  db $C4, $C1, $7D, $6F, $5C, $08, $60     // vmovdqa ymm3, ymmword ptr [rcx+r8+60h]
-  db $C4, $C1, $7D, $7F, $04, $10          // vmovdqa ymmword ptr [rdx+r8], ymm0
-  db $C4, $C1, $7D, $7F, $4C, $10, $20     // vmovdqa ymmword ptr [rdx+r8+20h], ymm1
-  db $C4, $C1, $7D, $7F, $54, $10, $40     // vmovdqa ymmword ptr [rdx+r8+40h], ymm2
-  db $C4, $C1, $7D, $7F, $5C, $10, $60     // vmovdqa ymmword ptr [rdx+r8+60h], ymm3
+  db $C4, $C1, $7D, $6F, $04, $08      // vmovdqa ymm0, ymmword ptr [rcx+r8]
+  db $C4, $C1, $7D, $6F, $4C, $08, $20 // vmovdqa ymm1, ymmword ptr [rcx+r8+20h]
+  db $C4, $C1, $7D, $6F, $54, $08, $40 // vmovdqa ymm2, ymmword ptr [rcx+r8+40h]
+  db $C4, $C1, $7D, $6F, $5C, $08, $60 // vmovdqa ymm3, ymmword ptr [rcx+r8+60h]
+  db $C4, $C1, $7D, $7F, $04, $10      // vmovdqa ymmword ptr [rdx+r8], ymm0
+  db $C4, $C1, $7D, $7F, $4C, $10, $20 // vmovdqa ymmword ptr [rdx+r8+20h], ymm1
+  db $C4, $C1, $7D, $7F, $54, $10, $40 // vmovdqa ymmword ptr [rdx+r8+40h], ymm2
+  db $C4, $C1, $7D, $7F, $5C, $10, $60 // vmovdqa ymmword ptr [rdx+r8+60h], ymm3
   add r8, 128
   cmp r8, -128
   jl  @AvxBigMoveAlignedAll
@@ -4781,16 +4914,16 @@ asm
 
 @MoveLoopAvx:
   {Move a 16 byte block}
-  db $C4, $A1, $79, $6F, $04, $01  // vmovdqa xmm0,xmmword ptr [rcx+r8]
-  db $C4, $A1, $79, $7F, $04, $02  // vmovdqa xmmword ptr [rdx+r8],xmm0
+  db $C4, $A1, $79, $6F, $04, $01       // vmovdqa xmm0,xmmword ptr [rcx+r8]
+  db $C4, $A1, $79, $7F, $04, $02       // vmovdqa xmmword ptr [rdx+r8],xmm0
   {Are there another 16 bytes to move?}
   add r8, 16
   js @MoveLoopAvx
 
-  db $C5, $FD, $EF, $C0          // vpxor       ymm0,ymm0,ymm0
-  db $C5, $F5, $EF, $C9          // vpxor       ymm1,ymm1,ymm1
-  db $C5, $ED, $EF, $D2          // vpxor       ymm2,ymm2,ymm2
-  db $C5, $E5, $EF, $DB          // vpxor       ymm3,ymm3,ymm3
+  db $C5, $FD, $EF, $C0                 // vpxor       ymm0,ymm0,ymm0
+  db $C5, $F5, $EF, $C9                 // vpxor       ymm1,ymm1,ymm1
+  db $C5, $ED, $EF, $D2                 // vpxor       ymm2,ymm2,ymm2
+  db $C5, $E5, $EF, $DB                 // vpxor       ymm3,ymm3,ymm3
 
   {$ifdef AsmCodeAlign}.align 8{$endif}
 @MoveLast8:
@@ -4806,6 +4939,11 @@ end;
 
 {$ifdef EnableERMS}
 
+// According to the Intel Optimization Reference Manual (Section 3.7.6.2, Memcpy Considerations), rep movsb outperforms AVX copy on blocks of 2048 bytes and above
+
+const
+  cLeastErmsAdvantageLengh = 2048;
+
 procedure MoveX32LpAvx1WithErms(const ASource; var ADest; ACount: NativeInt); {$ifdef fpc64bit} assembler; nostackframe; {$endif}
 asm
   {$ifndef unix}
@@ -4819,7 +4957,7 @@ asm
   neg r8
   jns @MoveLast8
 
-  cmp r8, -2048  // According to the Intel Manual, rep movsb outperforms AVX copy on blocks of 2048 bytes and above
+  cmp r8, 0-cLeastErmsAdvantageLengh
   jg @DontDoRepMovsb
 
   {$ifdef AsmCodeAlign}.align 4{$endif}
@@ -4850,14 +4988,14 @@ asm
   {$ifdef AsmCodeAlign}.align 16{$endif}
 
 @AvxBigMoveAlignedAll:
-  db $C4, $C1, $7D, $6F, $04, $08          // vmovdqa ymm0, ymmword ptr [rcx+r8]
-  db $C4, $C1, $7D, $6F, $4C, $08, $20     // vmovdqa ymm1, ymmword ptr [rcx+r8+20h]
-  db $C4, $C1, $7D, $6F, $54, $08, $40     // vmovdqa ymm2, ymmword ptr [rcx+r8+40h]
-  db $C4, $C1, $7D, $6F, $5C, $08, $60     // vmovdqa ymm3, ymmword ptr [rcx+r8+60h]
-  db $C4, $C1, $7D, $7F, $04, $10          // vmovdqa ymmword ptr [rdx+r8], ymm0
-  db $C4, $C1, $7D, $7F, $4C, $10, $20     // vmovdqa ymmword ptr [rdx+r8+20h], ymm1
-  db $C4, $C1, $7D, $7F, $54, $10, $40     // vmovdqa ymmword ptr [rdx+r8+40h], ymm2
-  db $C4, $C1, $7D, $7F, $5C, $10, $60     // vmovdqa ymmword ptr [rdx+r8+60h], ymm3
+  db $C4, $C1, $7D, $6F, $04, $08      // vmovdqa ymm0, ymmword ptr [rcx+r8]
+  db $C4, $C1, $7D, $6F, $4C, $08, $20 // vmovdqa ymm1, ymmword ptr [rcx+r8+20h]
+  db $C4, $C1, $7D, $6F, $54, $08, $40 // vmovdqa ymm2, ymmword ptr [rcx+r8+40h]
+  db $C4, $C1, $7D, $6F, $5C, $08, $60 // vmovdqa ymm3, ymmword ptr [rcx+r8+60h]
+  db $C4, $C1, $7D, $7F, $04, $10      // vmovdqa ymmword ptr [rdx+r8], ymm0
+  db $C4, $C1, $7D, $7F, $4C, $10, $20 // vmovdqa ymmword ptr [rdx+r8+20h], ymm1
+  db $C4, $C1, $7D, $7F, $54, $10, $40 // vmovdqa ymmword ptr [rdx+r8+40h], ymm2
+  db $C4, $C1, $7D, $7F, $5C, $10, $60 // vmovdqa ymmword ptr [rdx+r8+60h], ymm3
   add r8, 128
   cmp r8, -128
   jl  @AvxBigMoveAlignedAll
@@ -4868,17 +5006,17 @@ asm
 
 @MoveLoopAvx:
   {Move a 16 byte block}
-  db $C4, $A1, $79, $6F, $04, $01  // vmovdqa xmm0,xmmword ptr [rcx+r8]
-  db $C4, $A1, $79, $7F, $04, $02  // vmovdqa xmmword ptr [rdx+r8],xmm0
+  db $C4, $A1, $79, $6F, $04, $01      // vmovdqa xmm0,xmmword ptr [rcx+r8]
+  db $C4, $A1, $79, $7F, $04, $02      // vmovdqa xmmword ptr [rdx+r8],xmm0
   {Are there another 16 bytes to move?}
   add r8, 16
   js @MoveLoopAvx
 
-  db $C5, $FC, $57, $C0          // vxorps      ymm0,ymm0,ymm0
-  db $C5, $F4, $57, $C9          // vxorps      ymm1,ymm1,ymm1
-  db $C5, $EC, $57, $D2          // vxorps      ymm2,ymm2,ymm2
-  db $C5, $E4, $57, $DB          // vxorps      ymm3,ymm3,ymm3
-  db $C5, $F8, $77               // vzeroupper
+  db $C5, $FC, $57, $C0                // vxorps      ymm0,ymm0,ymm0
+  db $C5, $F4, $57, $C9                // vxorps      ymm1,ymm1,ymm1
+  db $C5, $EC, $57, $D2                // vxorps      ymm2,ymm2,ymm2
+  db $C5, $E4, $57, $DB                // vxorps      ymm3,ymm3,ymm3
+  db $C5, $F8, $77                     // vzeroupper
 
   {$ifdef AsmCodeAlign}.align 8{$endif}
 
@@ -4906,7 +5044,7 @@ asm
   neg r8
   jns @MoveLast8
 
-  cmp r8, -2048  // According to the Intel Manual, rep movsb outperforms AVX copy on blocks of 2048 bytes and above
+  cmp r8, 0-cLeastErmsAdvantageLengh
   jg @DontDoRepMovsb
 
   {$ifdef AsmCodeAlign}.align 4{$endif}
@@ -4934,14 +5072,14 @@ asm
   {$ifdef AsmCodeAlign}.align 16{$endif}
 
 @AvxBigMoveAlignedAll:
-  db $C4, $C1, $7D, $6F, $04, $08          // vmovdqa ymm0, ymmword ptr [rcx+r8]
-  db $C4, $C1, $7D, $6F, $4C, $08, $20     // vmovdqa ymm1, ymmword ptr [rcx+r8+20h]
-  db $C4, $C1, $7D, $6F, $54, $08, $40     // vmovdqa ymm2, ymmword ptr [rcx+r8+40h]
-  db $C4, $C1, $7D, $6F, $5C, $08, $60     // vmovdqa ymm3, ymmword ptr [rcx+r8+60h]
-  db $C4, $C1, $7D, $7F, $04, $10          // vmovdqa ymmword ptr [rdx+r8], ymm0
-  db $C4, $C1, $7D, $7F, $4C, $10, $20     // vmovdqa ymmword ptr [rdx+r8+20h], ymm1
-  db $C4, $C1, $7D, $7F, $54, $10, $40     // vmovdqa ymmword ptr [rdx+r8+40h], ymm2
-  db $C4, $C1, $7D, $7F, $5C, $10, $60     // vmovdqa ymmword ptr [rdx+r8+60h], ymm3
+  db $C4, $C1, $7D, $6F, $04, $08      // vmovdqa ymm0, ymmword ptr [rcx+r8]
+  db $C4, $C1, $7D, $6F, $4C, $08, $20 // vmovdqa ymm1, ymmword ptr [rcx+r8+20h]
+  db $C4, $C1, $7D, $6F, $54, $08, $40 // vmovdqa ymm2, ymmword ptr [rcx+r8+40h]
+  db $C4, $C1, $7D, $6F, $5C, $08, $60 // vmovdqa ymm3, ymmword ptr [rcx+r8+60h]
+  db $C4, $C1, $7D, $7F, $04, $10      // vmovdqa ymmword ptr [rdx+r8], ymm0
+  db $C4, $C1, $7D, $7F, $4C, $10, $20 // vmovdqa ymmword ptr [rdx+r8+20h], ymm1
+  db $C4, $C1, $7D, $7F, $54, $10, $40 // vmovdqa ymmword ptr [rdx+r8+40h], ymm2
+  db $C4, $C1, $7D, $7F, $5C, $10, $60 // vmovdqa ymmword ptr [rdx+r8+60h], ymm3
   add r8, 128
   cmp r8, -128
   jl  @AvxBigMoveAlignedAll
@@ -4952,16 +5090,16 @@ asm
 
 @MoveLoopAvx:
   {Move a 16 byte block}
-  db $C4, $A1, $79, $6F, $04, $01  // vmovdqa xmm0,xmmword ptr [rcx+r8]
-  db $C4, $A1, $79, $7F, $04, $02  // vmovdqa xmmword ptr [rdx+r8],xmm0
+  db $C4, $A1, $79, $6F, $04, $01      // vmovdqa xmm0,xmmword ptr [rcx+r8]
+  db $C4, $A1, $79, $7F, $04, $02      // vmovdqa xmmword ptr [rdx+r8],xmm0
   {Are there another 16 bytes to move?}
   add r8, 16
   js @MoveLoopAvx
 
-  db $C5, $FD, $EF, $C0          // vpxor       ymm0,ymm0,ymm0
-  db $C5, $F5, $EF, $C9          // vpxor       ymm1,ymm1,ymm1
-  db $C5, $ED, $EF, $D2          // vpxor       ymm2,ymm2,ymm2
-  db $C5, $E5, $EF, $DB          // vpxor       ymm3,ymm3,ymm3
+  db $C5, $FD, $EF, $C0                // vpxor       ymm0,ymm0,ymm0
+  db $C5, $F5, $EF, $C9                // vpxor       ymm1,ymm1,ymm1
+  db $C5, $ED, $EF, $D2                // vpxor       ymm2,ymm2,ymm2
+  db $C5, $E5, $EF, $DB                // vpxor       ymm3,ymm3,ymm3
 
   {$ifdef AsmCodeAlign}.align 8{$endif}
 
@@ -5691,18 +5829,53 @@ begin
   end;
 end;
 
+{$ifdef EnableMemoryLeakReportingUsesQualifiedClassName}
+type
+  PClassData = ^TClassData;
+  TClassData = record
+    ClassType: TClass;
+    ParentInfo: Pointer;
+    PropCount: SmallInt;
+    UnitName: ShortString;
+  end;
+{$endif EnableMemoryLeakReportingUsesQualifiedClassName}
+
 {Appends the name of the class to the destination buffer and returns the new
  destination position}
 function AppendClassNameToBuffer(AClass: TClass; ADestination: PAnsiChar; ADestinationBufferLengthChars: Cardinal): PAnsiChar;
 var
+{$ifdef EnableMemoryLeakReportingUsesQualifiedClassName}
+  FirstUnitNameChar: PAnsiChar;
+  LClassInfo: Pointer;
+  UnitName: PShortString;
+{$endif EnableMemoryLeakReportingUsesQualifiedClassName}
   LPClassName: PShortString;
 begin
   {Get a pointer to the class name}
   if AClass <> nil then
   begin
+    Result := ADestination;
+{$ifdef EnableMemoryLeakReportingUsesQualifiedClassName}
+    // based on TObject.UnitScope
+    LClassInfo := AClass.ClassInfo;
+    if LClassInfo <> nil then // prepend the UnitName
+    begin
+      UnitName := @PClassData(PByte(LClassInfo) + 2 + PByte(PByte(LClassInfo) + 1)^).UnitName;
+      FirstUnitNameChar := @UnitName^[1];
+      if FirstUnitNameChar^ <> '@' then
+        Result := AppendStringToBuffer(FirstUnitNameChar, Result, Length(UnitName^), ADestinationBufferLengthChars)
+      else // Pos does no memory allocations, so it is safe to use
+      begin // Skip the '@', then copy until the ':' - never seen this happen in Delphi, but might be a C++ thing
+        Result := AppendStringToBuffer(@UnitName^[2], Result, Pos(ShortString(':'), UnitName^) - 2, ADestinationBufferLengthChars)
+        ;
+      end;
+      // dot between unit name and class name:
+      Result := AppendStringToBuffer('.', Result, Length('.'), ADestinationBufferLengthChars);
+    end;
+{$endif EnableMemoryLeakReportingUsesQualifiedClassName}
     LPClassName := PShortString(PPointer(PByte(AClass) + vmtClassName)^);
     {Append the class name}
-    Result := AppendStringToBuffer(@LPClassName^[1], ADestination, Length(LPClassName^), ADestinationBufferLengthChars);
+    Result := AppendStringToBuffer(@LPClassName^[1], Result, Length(LPClassName^), ADestinationBufferLengthChars);
   end
   else
   begin
@@ -5733,7 +5906,7 @@ var
   begin
     {Do some basic pointer checks: Must be dword aligned and beyond 64K}
     if (UIntPtr(APAddress) > 65535)
-      and (UIntPtr(APAddress) and 3 = 0) then
+      and ((UIntPtr(APAddress) and 3) = 0) then
     begin
       {Do we need to recheck the virtual memory?}
       if (UIntPtr(LMemInfo.BaseAddress) > UIntPtr(APAddress))
@@ -5746,8 +5919,8 @@ var
       {Check the readability of the memory address}
       Result := (LMemInfo.RegionSize >= 4)
         and (LMemInfo.State = MEM_COMMIT)
-        and (LMemInfo.Protect and (PAGE_READONLY or PAGE_READWRITE or PAGE_EXECUTE or PAGE_EXECUTE_READ or PAGE_EXECUTE_READWRITE or PAGE_EXECUTE_WRITECOPY) <> 0)
-        and (LMemInfo.Protect and PAGE_GUARD = 0);
+        and ((LMemInfo.Protect and (PAGE_READONLY or PAGE_READWRITE or PAGE_EXECUTE or PAGE_EXECUTE_READ or PAGE_EXECUTE_READWRITE or PAGE_EXECUTE_WRITECOPY)) <> 0)
+        and ((LMemInfo.Protect and PAGE_GUARD) = 0);
     end
     else
       Result := False;
@@ -5803,7 +5976,7 @@ var
   LPSmallBlockPool: PSmallBlockPoolHeader;
 begin
   LBlockHeader := PNativeUInt(PByte(APointer) - BlockHeaderSize)^;
-  if LBlockHeader and (IsMediumBlockFlag or IsLargeBlockFlag) = 0 then
+  if (LBlockHeader and (IsMediumBlockFlag or IsLargeBlockFlag)) = 0 then
   begin
     LPSmallBlockPool := PSmallBlockPoolHeader(LBlockHeader and DropSmallFlagsMask);
     Result := LPSmallBlockPool.BlockType.BlockSize - BlockHeaderSize;
@@ -5911,7 +6084,7 @@ end;
 
 {$ifdef Use32BitAsm}
   {$ifndef MediumBlocksLockedCriticalSection}
-    {$define Use32BitAsmForLockMediumBlocks}
+    {$define UseOriginalFastMM4_LockMediumBlocksAsm}
   {$endif}
 {$endif}
 
@@ -5922,7 +6095,7 @@ end;
 {Locks the medium blocks. Note that the 32-bit assembler version is assumed to
  preserve all registers except eax.}
 
-{$ifndef Use32BitAsmForLockMediumBlocks}
+{$ifndef UseOriginalFastMM4_LockMediumBlocksAsm}
 
 function LockMediumBlocks({$ifdef UseReleaseStack}APointer: Pointer = nil; APDelayRelease: PBoolean = nil{$endif}): Boolean; // returns true if was contention
 
@@ -5987,60 +6160,70 @@ begin
   {$endif MediumBlocksLockedCriticalSection}
   end;
 end;
-{$else Use32BitAsmForLockMediumBlocks}
+
+{$else UseOriginalFastMM4_LockMediumBlocksAsm}
+
+{ This is the original "LockMediumBlocks" assembly implementation that uses a
+loop of Sleep() or SwitchToThread() as opposing to an efficient approach of FastMM4-AVX. }
+
 procedure LockMediumBlocks;
 asm
+{ This implemenation will not be compiled into FastMM4-AVX unless you
+  undefine the MediumBlocksLockedCriticalSection. You may only need
+  this implementation if you would like to use the old locking mechanism of
+  the original FastMM4 }
+
   {Note: This routine is assumed to preserve all registers except eax for 32-bit Asm}
 @MediumBlockLockLoop:
-  mov eax, (cLockbyteLocked shl 8) or cLockByteAvailable
+  mov     eax, (cLockbyteLocked shl 8) or cLockByteAvailable
   {Attempt to lock the medium blocks}
-  lock cmpxchg MediumBlocksLocked, ah
-  je @DoneNoContention
+  lock    cmpxchg MediumBlocksLocked, ah  // cmpxchg also uses AL as an implicit operand
+  je      @DoneNoContention
 {$ifdef NeverSleepOnThreadContention}
   {Pause instruction (improves performance on P4)}
-  db $F3, $90 // pause
+  db      $F3, $90 // pause
   {$ifdef UseSwitchToThread}
-  push ecx
-  push edx
-  call SwitchToThreadIfSupported
-  pop edx
-  pop ecx
+  push    ecx
+  push    edx
+  call    SwitchToThreadIfSupported
+  pop     edx
+  pop     ecx
   {$endif}
   {Try again}
-  jmp @MediumBlockLockLoop
+  jmp     @MediumBlockLockLoop
 {$else NeverSleepOnThreadContention}
   {Couldn't lock the medium blocks - sleep and try again}
-  push ecx
-  push edx
-  push InitialSleepTime
-  call Sleep
-  pop edx
-  pop ecx
+  push    ecx
+  push    edx
+  push    InitialSleepTime
+  call    Sleep
+  pop     edx
+  pop     ecx
   {Try again}
-  mov eax, (cLockbyteLocked shl 8) or cLockByteAvailable
+  mov     eax, (cLockbyteLocked shl 8) or cLockByteAvailable
   {Attempt to grab the block type}
-  lock cmpxchg MediumBlocksLocked, ah
-  je @DoneWithContention
+  lock    cmpxchg MediumBlocksLocked, ah  // cmpxchg also uses AL as an implicit operand
+  je      @DoneWithContention
   {Couldn't lock the medium blocks - sleep and try again}
-  push ecx
-  push edx
-  push AdditionalSleepTime
-  call Sleep
-  pop edx
-  pop ecx
+  push    ecx
+  push    edx
+  push    AdditionalSleepTime
+  call    Sleep
+  pop     edx
+  pop     ecx
   {Try again}
-  jmp @MediumBlockLockLoop
+  jmp     @MediumBlockLockLoop
 {$endif NeverSleepOnThreadContention}
   {$ifdef AsmCodeAlign}.align 8{$endif}
 @DoneNoContention:
-  xor eax, eax
-  jmp @Done
+  xor     eax, eax
+  jmp     @Done
   {$ifdef AsmCodeAlign}.align 8{$endif}
 @DoneWithContention:
-  mov eax, 1
+  mov     eax, 1
 @Done:
 end;
-{$endif Use32BitAsmForLockMediumBlocks}
+{$endif UseOriginalFastMM4_LockMediumBlocksAsm}
 
 procedure UnlockMediumBlocks;
   {$ifndef DEBUG}{$ifdef FASTMM4_ALLOW_INLINES}inline;{$endif}{$endif}
@@ -6066,8 +6249,10 @@ end;
 procedure RemoveMediumFreeBlock(APMediumFreeBlock: PMediumFreeBlock);
 {$ifndef ASMVersion}
 var
-  LPreviousFreeBlock, LNextFreeBlock: PMediumFreeBlock;
-  LBinNumber, LBinGroupNumber: Cardinal;
+  LPreviousFreeBlock,
+  LNextFreeBlock: PMediumFreeBlock;
+  LBinNumber,
+  LBinGroupNumber: Cardinal;
 begin
   {Get the current previous and next blocks}
   LNextFreeBlock := APMediumFreeBlock.NextFreeBlock;
@@ -6181,8 +6366,10 @@ end;
 procedure InsertMediumBlockIntoBin(APMediumFreeBlock: PMediumFreeBlock; AMediumBlockSize: Cardinal);
 {$ifndef ASMVersion}
 var
-  LBinNumber, LBinGroupNumber: Cardinal;
-  LPBin, LPFirstFreeBlock: PMediumFreeBlock;
+  LBinNumber,
+  LBinGroupNumber: Cardinal;
+  LPBin,
+  LPFirstFreeBlock: PMediumFreeBlock;
 begin
   {Get the bin number for this block size. Get the bin that holds blocks of at
    least this size.}
@@ -6312,8 +6499,10 @@ end;
 procedure BinMediumSequentialFeedRemainder;
 {$ifndef ASMVersion}
 var
-  LSequentialFeedFreeSize, LNextBlockSizeAndFlags: NativeUInt;
-  LPRemainderBlock, LNextMediumBlock: Pointer;
+  LSequentialFeedFreeSize,
+  LNextBlockSizeAndFlags: NativeUInt;
+  LPRemainderBlock,
+  LNextMediumBlock: Pointer;
 begin
   LSequentialFeedFreeSize := MediumSequentialFeedBytesLeft;
   if LSequentialFeedFreeSize > 0 then
@@ -6687,7 +6876,8 @@ end;
 function FreeLargeBlock(APointer: Pointer
   {$ifdef UseReleaseStack}; ACleanupOperation: Boolean = False{$endif}): Integer;
 var
-  LPreviousLargeBlockHeader, LNextLargeBlockHeader: PLargeBlockHeader;
+  LPreviousLargeBlockHeader,
+  LNextLargeBlockHeader: PLargeBlockHeader;
 {$ifndef POSIX}
   LRemainingSize: NativeUInt;
   LCurrentSegment: Pointer;
@@ -6751,7 +6941,7 @@ begin
     LNextLargeBlockHeader := PLargeBlockHeader(APointer).NextLargeBlockHeader;
   {$ifndef POSIX}
     {Is the large block segmented?}
-    if PLargeBlockHeader(APointer).BlockSizeAndFlags and LargeBlockIsSegmented = 0 then
+    if (PLargeBlockHeader(APointer).BlockSizeAndFlags and LargeBlockIsSegmented) = 0 then
     begin
   {$endif}
       {Single segment large block: Try to free it}
@@ -6820,8 +7010,11 @@ end;
  pointer, or nil on error}
 function ReallocateLargeBlock(APointer: Pointer; ANewSize: NativeUInt): Pointer;
 var
-  LOldAvailableSize, LBlockHeader, LOldUserSize, LMinimumUpsize,
-    LNewAllocSize: NativeUInt;
+  LOldAvailableSize,
+  LBlockHeader,
+  LOldUserSize,
+  LMinimumUpsize,
+  LNewAllocSize: NativeUInt;
 {$ifndef POSIX}
   LNewSegmentSize: NativeUInt;
   LNextSegmentPointer: Pointer;
@@ -7086,16 +7279,26 @@ function FastGetMemPascal(ASize: {$ifdef XE2AndUp}NativeInt{$else}{$ifdef fpc}Na
 
 {$ifdef FastGetMemNeedPascalCode}
 var
-  LMediumBlock{$ifndef FullDebugMode}, LNextFreeBlock, LSecondSplit{$endif}: PMediumFreeBlock;
+  LMediumBlock: PMediumFreeBlock;
+{$ifndef FullDebugMode}
+  LNextFreeBlock, LSecondSplit: PMediumFreeBlock;
+{$endif}
   LNextMediumBlockHeader: PNativeUInt;
-  LBlockSize, LAvailableBlockSize{$ifndef FullDebugMode}, LSecondSplitSize{$endif},
-    LSequentialFeedFreeSize: NativeUInt;
+  LBlockSize, LAvailableBlockSize: NativeUInt;
+{$ifndef FullDebugMode}
+  LSecondSplitSize: NativeUInt;
+{$endif}
+  LSequentialFeedFreeSize: NativeUInt;
   LPSmallBlockType: PSmallBlockType;
   LPSmallBlockPool, LPNewFirstPool: PSmallBlockPoolHeader;
   LNewFirstFreeBlock: Pointer;
   LPMediumBin: PMediumFreeBlock;
-  LBinNumber, {$ifndef FullDebugMode}LBinGroupsMasked, {$endif}LBinGroupMasked,
-    LBinGroupNumber: NativeUInt;
+  LBinNumber: NativeUInt;
+{$ifndef FullDebugMode}
+  LBinGroupsMasked: NativeUInt;
+{$endif}
+  LBinGroupMasked,
+  LBinGroupNumber: NativeUInt;
 {$ifdef LogLockContention}
   LDidSleep: Boolean;
 {$ifndef FullDebugMode}
@@ -7142,14 +7345,15 @@ begin
       AllocSz2SmlBlkTypOfsDivSclFctr[LSmallBlockSizeInGranularUnits]
           shl MaximumCpuScaleFactorPowerOf2
    {$else}
+      (
       AllocSize2SmallBlockTypesIdx[LSmallBlockSizeInGranularUnits]
         {$ifdef SmallBlockTypeRecSizeIsPowerOf2}
           shl SmallBlockTypeRecSizePowerOf2
         {$else}
           * SmallBlockTypeRecSize
         {$endif}
+      )
    {$endif}
-
         + UIntPtr(@SmallBlockTypes)
     );
 {$ifdef UseReleaseStack}
@@ -7203,7 +7407,7 @@ begin
         {Both this block type and the next is in use: sleep}
         Sleep(InitialSleepTime);
         {Try to acquire the lock again}
-        if AcquireLockByte(@LPSmallBlockType.SmallBlockTypeLocked) then
+        if AcquireLockByte(LPSmallBlockType.SmallBlockTypeLocked) then
           Break;
         {Sleep longer}
         Sleep(AdditionalSleepTime);
@@ -7297,7 +7501,7 @@ begin
           LWasMultiThread := True;
           {$endif}
           LMediumBlocksLocked := True;
-          {$ifdef LogLockContention}LDidSleep := {$endif}LockMediumBlocks();
+          {$ifdef LogLockContention}LDidSleep := {$endif}LockMediumBlocks;
         end;
 {$ifdef LogLockContention}
         if LDidSleep then
@@ -7515,7 +7719,7 @@ begin
         LWasMultithread := True;
 {$endif}
         LMediumBlocksLocked := True;
-        {$ifdef LogLockContention}LDidSleep := {$endif}LockMediumBlocks();
+        {$ifdef LogLockContention}LDidSleep := {$endif}LockMediumBlocks;
         {$ifdef LogLockContention}
         if LDidSleep then
         begin
@@ -7844,7 +8048,8 @@ like IsMultithreaded or MediumBlocksLocked}
    mov  eax, cLockByteLocked
    mov  edx, Type(TSmallBlockType)
   {$ifndef DebugAcquireLockByte}
-   cmp  TSmallBlockType([ebx]).SmallBlockTypeLocked, al       // we are using faster, normal load to not consume the resources and only after it is ready, do once again interlocked exchange
+// use the "test, test-and-set" technique, details are in the comment section at the beginning of the file
+   cmp  TSmallBlockType([ebx]).SmallBlockTypeLocked, al       
    je   @FirstBlockLocked
   {$else}
    mov  al, TSmallBlockType([ebx]).SmallBlockTypeLocked
@@ -7901,7 +8106,7 @@ like IsMultithreaded or MediumBlocksLocked}
    sub  ebx, edx
   {$ifdef AsmCodeAlign}.align 8{$endif}
 @LockSmallBlockTypeLoop:
-   mov  edx, 5000
+   mov  edx, cSpinWaitLoopCount
    mov  eax, cLockByteLocked
   {$ifdef AsmCodeAlign}.align 16{$endif}
 @DidntLock:
@@ -7910,7 +8115,8 @@ like IsMultithreaded or MediumBlocksLocked}
    jz   @SwitchToThread // for static branch prediction, jump forward means "unlikely"
    db   $F3, $90 // pause
    {$ifndef DebugAcquireLockByte}
-   cmp  TSmallBlockType([ebx]).SmallBlockTypeLocked, al       // we are using faster, normal load to not consume the resources and only after it is ready, do once again interlocked exchange
+// use the "test, test-and-set" technique, details are in the comment section at the beginning of the file
+   cmp  TSmallBlockType([ebx]).SmallBlockTypeLocked, al       
    je   @NormalLoadLoop // for static branch prediction, jump backwards means "likely"
    {$else}
    mov  al, TSmallBlockType([ebx]).SmallBlockTypeLocked
@@ -7942,10 +8148,13 @@ like IsMultithreaded or MediumBlocksLocked}
 
 {$else !SmallBlocksLockedCriticalSection}
 
+{ The 32-bit implemenation from the original FastMM4 that employs a loop of Sleep() or SwitchToThread().
+By default, it will not be compiled into FastMM4-AVX which uses more efficient approach.}
+@LockSmallBlockTypeLoop:
   mov eax, (cLockbyteLocked shl 8) or cLockByteAvailable
   mov edx, eax
   {Attempt to grab the block type}
-  lock cmpxchg TSmallBlockType([ebx]).SmallBlockTypeLocked, ah {cmpxchg always also operates with al, implicitly}
+  lock cmpxchg TSmallBlockType([ebx]).SmallBlockTypeLocked, ah  // cmpxchg also uses AL as an implicit operand
   je @GotLockOnSmallBlockType
   {Try the next size}
   add ebx, Type(TSmallBlockType)
@@ -7975,7 +8184,7 @@ like IsMultithreaded or MediumBlocksLocked}
   pop  eax {restore existing edx value straight into eax}
   {Try again}
   {Attempt to grab the block type}
-  lock cmpxchg TSmallBlockType([ebx]).SmallBlockTypeLocked, ah
+  lock cmpxchg TSmallBlockType([ebx]).SmallBlockTypeLocked, ah  // cmpxchg also uses AL as an implicit operand
   je @GotLockOnSmallBlockType
   {Couldn't grab the block type - sleep and try again}
   push AdditionalSleepTime
@@ -7987,7 +8196,6 @@ like IsMultithreaded or MediumBlocksLocked}
 
 {===== END OF SMALL BLOCK LOCKING CODE; 32-BIT FASTGETMEM =====}
 
-
   {$ifdef AsmCodeAlign}.align 8{$endif}
 @AllocateSmallBlockPool:
   {save additional registers}
@@ -7998,9 +8206,9 @@ like IsMultithreaded or MediumBlocksLocked}
   test ebp, (UnsignedBit shl StateBitMultithreaded)
   jz @MediumBlocksLockedForPool
 {$endif}
-  {$ifndef Use32BitAsmForLockMediumBlocks} push ecx; push edx {$endif}
+  {$ifndef UseOriginalFastMM4_LockMediumBlocksAsm} push ecx; push edx {$endif}
   call LockMediumBlocks
-  {$ifndef Use32BitAsmForLockMediumBlocks} pop edx; pop ecx {$endif}
+  {$ifndef UseOriginalFastMM4_LockMediumBlocksAsm} pop edx; pop ecx {$endif}
   or ebp, (UnsignedBit shl StateBitMediumLocked)
   {$ifdef AsmCodeAlign}.align 8{$endif}
 @MediumBlocksLockedForPool:
@@ -8152,9 +8360,9 @@ like IsMultithreaded or MediumBlocksLocked}
   test ebp, (UnsignedBit shl StateBitMultithreaded)
   jz @MediumBlocksLocked
 {$endif}
-  {$ifndef Use32BitAsmForLockMediumBlocks} push ecx; push edx {$endif}
+  {$ifndef UseOriginalFastMM4_LockMediumBlocksAsm} push ecx; push edx {$endif}
   call LockMediumBlocks
-  {$ifndef Use32BitAsmForLockMediumBlocks} pop edx; pop ecx {$endif}
+  {$ifndef UseOriginalFastMM4_LockMediumBlocksAsm} pop edx; pop ecx {$endif}
   or ebp, (UnsignedBit shl StateBitMediumLocked)
   {$ifdef AsmCodeAlign}.align 8{$endif}
 @MediumBlocksLocked:
@@ -8306,9 +8514,9 @@ asm
   {On entry:
     rcx = ASize}
 
-  {Do not put ".noframe" here, for the reasons given explained at the comment
-  at the "BinMediumSequentialFeedRemainder" function at the start of the
-  64-bit BASM code}
+  {Do not put ".noframe" here, for the reasons given at the comment
+  in the "BinMediumSequentialFeedRemainder" function at the start of the
+  64-bit assembler code}
 
   {$ifdef AllowAsmParams}
   .params 2
@@ -8433,7 +8641,8 @@ asm
 {$ifdef SmallBlocksLockedCriticalSection}
    mov  eax, cLockByteLocked
    mov  edx, Type(TSmallBlockType)
-   cmp  TSmallBlockType([rbx]).SmallBlockTypeLocked, al       // we are using faster, normal load to not consume the resources and only after it is ready, do once again interlocked exchange
+// use the "test, test-and-set" technique, details are in the comment section at the beginning of the file
+   cmp  TSmallBlockType([rbx]).SmallBlockTypeLocked, al       
    je   @FirstBlockLocked
    lock xchg TSmallBlockType([rbx]).SmallBlockTypeLocked, al
    cmp  al, cLockByteLocked
@@ -8464,7 +8673,7 @@ asm
    push  rcx
   {$ifdef AsmCodeAlign}.align 8{$endif}
 @LockSmallBlockTypeLoop:
-  mov  edx, 5000
+  mov  edx, cSpinWaitLoopCount
   mov  eax, cLockByteLocked
   {$ifdef AsmCodeAlign}.align 16{$endif}
 @DidntLock:
@@ -8473,7 +8682,8 @@ asm
   jz   @SwitchToThread // for static branch prediction, jump forward means "unlikely"
   db   $F3, $90 // pause
  {$ifndef DebugAcquireLockByte}
-  cmp  TSmallBlockType([rbx]).SmallBlockTypeLocked, al       // we are using faster, normal load to not consume the resources and only after it is ready, do once again interlocked exchange
+// use the "test, test-and-set" technique, details are in the comment section at the beginning of the file
+  cmp  TSmallBlockType([rbx]).SmallBlockTypeLocked, al       
   je   @NormalLoadLoop // for static branch prediction, jump backwards means "likely"
  {$else}
   mov  al, TSmallBlockType([rbx]).SmallBlockTypeLocked
@@ -8496,10 +8706,13 @@ asm
 
 {$else !SmallBlocksLockedCriticalSection}
 
+{ The 64-bit implemenation from the original FastMM4 that employs a loop of Sleep() or SwitchToThread().
+By default, it will not be compiled into FastMM4-AVX which uses more efficient approach.}
+@LockSmallBlockTypeLoop:
   mov eax, (cLockbyteLocked shl 8) or cLockByteAvailable
   mov edx, eax
   {Attempt to grab the block type}
-  lock cmpxchg TSmallBlockType([rbx]).SmallBlockTypeLocked, ah {cmpxchg also always uses al implicitly}
+  lock cmpxchg TSmallBlockType([rbx]).SmallBlockTypeLocked, ah  // cmpxchg also uses AL as an implicit operand
   je @GotLockOnSmallBlockType
   {Try the next size}
   add rbx, Type(TSmallBlockType)
@@ -8515,7 +8728,7 @@ asm
   sub rbx, 2 * Type(TSmallBlockType)
 {$ifdef NeverSleepOnThreadContention}
   {Pause instruction (improves performance on P4)}
-  pause
+  db $F3, $90 // pause
   {$ifdef UseSwitchToThread}
   call SwitchToThreadIfSupported
   {$endif NeverSleepOnThreadContention}
@@ -8866,11 +9079,18 @@ end;
 function FreeMediumBlock(APointer: Pointer
   {$ifdef UseReleaseStack}; ACleanupOperation: Boolean = false{$endif}): Integer;
 var
-  LNextMediumBlock{$ifndef FullDebugMode}, LPreviousMediumBlock{$endif}: PMediumFreeBlock;
-  LNextMediumBlockSizeAndFlags: NativeUInt;
-  LBlockSize{$ifndef FullDebugMode}, LPreviousMediumBlockSize{$endif}: Cardinal;
+  LNextMediumBlock: PMediumFreeBlock;
 {$ifndef FullDebugMode}
-  LPPreviousMediumBlockPoolHeader, LPNextMediumBlockPoolHeader: PMediumBlockPoolHeader;
+  LPreviousMediumBlock: PMediumFreeBlock;
+{$endif}
+  LNextMediumBlockSizeAndFlags: NativeUInt;
+  LBlockSize: Cardinal;
+{$ifndef FullDebugMode}
+  LPreviousMediumBlockSize: Cardinal;
+{$endif}
+{$ifndef FullDebugMode}
+  LPPreviousMediumBlockPoolHeader,
+  LPNextMediumBlockPoolHeader: PMediumBlockPoolHeader;
 {$endif}
   LBlockHeader: NativeUInt;
 {$ifdef LogLockContention}
@@ -9117,11 +9337,17 @@ end;
 {$endif ASMVersion}
 
 {Replacement for SysFreeMem}
-function FastFreeMem(APointer: Pointer): {$ifdef fpc}{$IFDEF CPU64}PtrUInt{$ELSE}NativeUInt{$ENDIF}{$else}Integer{$endif};
+function FastFreeMem(APointer: Pointer): {$ifdef fpc}{$ifdef CPU64}PtrUInt{$else}NativeUInt{$endif}{$else}Integer{$endif};
 {$ifndef ASMVersion}
+const
+  CFastFreeMemReturnValueError = {$ifdef fpc}NativeUInt(-1){$else}-1{$endif};
 var
-  LPSmallBlockPool{$ifndef FullDebugMode}, LPPreviousPool, LPNextPool{$endif},
-    LPOldFirstPool: PSmallBlockPoolHeader;
+  LPSmallBlockPool: PSmallBlockPoolHeader;
+{$ifndef FullDebugMode}
+  LPPreviousPool,
+  LPNextPool: PSmallBlockPoolHeader;
+{$endif}
+  LPOldFirstPool: PSmallBlockPoolHeader;
   LPSmallBlockType: PSmallBlockType;
   LOldFirstFreeBlock: Pointer;
   LBlockHeader: NativeUInt;
@@ -9140,8 +9366,10 @@ var
   LWasMultithread: Boolean;
 {$endif}
   LSmallBlockWithoutLock: Boolean;
+  LFreeMediumBlockError: Boolean;
 begin
   LSmallBlockWithoutLock := False;
+  LFreeMediumBlockError := False;
 {$ifndef AssumeMultiThreaded}
   LWasMultithread := False;
 {$endif}
@@ -9159,7 +9387,7 @@ begin
   {Get the small block header: Is it actually a small block?}
   LBlockHeader := PNativeUInt(PByte(APointer) - BlockHeaderSize)^;
   {Is it a small block that is in use?}
-  if LBlockHeader and (IsFreeBlockFlag or IsMediumBlockFlag or IsLargeBlockFlag) = 0 then
+  if (LBlockHeader and (IsFreeBlockFlag or IsMediumBlockFlag or IsLargeBlockFlag)) = 0 then
   begin
     {Get a pointer to the block pool}
     LPSmallBlockPool := PSmallBlockPoolHeader(LBlockHeader);
@@ -9211,7 +9439,7 @@ begin
 
 {$else SmallBlocksLockedCriticalSection}
 
-      while not (AcquireLockByte(@(LPSmallBlockType.SmallBlockTypeLocked))) do
+      while not (AcquireLockByte(LPSmallBlockType.SmallBlockTypeLocked)) do
       begin
 {$ifdef UseReleaseStack}
         LPReleaseStack := @LPSmallBlockType.ReleaseStack[GetStackSlot];
@@ -9231,7 +9459,7 @@ begin
   {$endif}
 {$else}
         Sleep(InitialSleepTime);
-        if AcquireLockByte(@(LPSmallBlockType.SmallBlockTypeLocked)) then
+        if AcquireLockByte(LPSmallBlockType.SmallBlockTypeLocked) then
           Break;
         Sleep(AdditionalSleepTime);
 {$endif}
@@ -9309,7 +9537,10 @@ begin
           {$endif}
         end;
         {Free the block pool}
-        FreeMediumBlock(LPSmallBlockPool);
+        if FreeMediumBlock(LPSmallBlockPool) <> 0 then
+        begin
+          LFreeMediumBlockError := True;
+        end;
 {$ifdef UseReleaseStack}
         {Stop unwinding the release stack.}
         Break;
@@ -9356,13 +9587,19 @@ begin
 {$ifdef UseReleaseStack}
     end;
 {$endif}
-    {No error}
-    Result := 0;
+    if LFreeMediumBlockError then
+    begin
+      Result := CFastFreeMemReturnValueError;
+    end else
+    begin
+      {No error}
+      Result := 0;
+    end;
   end
   else
   begin
     {Is this a medium block or a large block?}
-    if LBlockHeader and (IsFreeBlockFlag or IsLargeBlockFlag) = 0 then
+    if (LBlockHeader and (IsFreeBlockFlag or IsLargeBlockFlag)) = 0 then
     begin
 {$ifdef ClearSmallAndMediumBlocksInFreeMem}
       {Get the block header, extract the block size and clear the block it.}
@@ -9376,10 +9613,10 @@ begin
     begin
       {Validate: Is this actually a Large block, or is it an attempt to free an
        already freed small block?}
-      if LBlockHeader and (IsFreeBlockFlag or IsMediumBlockFlag) = 0 then
+      if (LBlockHeader and (IsFreeBlockFlag or IsMediumBlockFlag)) = 0 then
         Result := FreeLargeBlock(APointer)
       else
-        Result := {$ifdef fpc}NativeUInt(-1){$else}-1{$endif};
+        Result := CFastFreeMemReturnValueError;
     end;
   end;
 end;
@@ -9525,7 +9762,7 @@ for flags like IsMultiThreaded or MediumBlocksLocked}
   cmp TSmallBlockType[ebx].SmallBlockTypeLocked, cLockByteLocked
   jne SmallBlockUnlockError
   {$endif}
-  mov TSmallBlockType[ebx].SmallBlockTypeLocked, cLockByteAvailable{todo: XXXXXXXXXXXXXXXXXX}
+  mov TSmallBlockType[ebx].SmallBlockTypeLocked, cLockByteAvailable
   {$ifdef AsmCodeAlign}.align 8{$endif}
 @DontUnlckSmlBlkAftrNotSeqFdPl:
   {Release this pool}
@@ -9539,7 +9776,8 @@ for flags like IsMultiThreaded or MediumBlocksLocked}
 @LockSmallBlockType:
 {$ifdef SmallBlocksLockedCriticalSection}
   mov  eax, cLockByteLocked
-  cmp  TSmallBlockType([ebx]).SmallBlockTypeLocked, al       // we are using faster, normal load to not consume the resources and only after it is ready, do once again interlocked exchange
+// use the "test, test-and-set" technique, details are in the comment section at the beginning of the file
+  cmp  TSmallBlockType([ebx]).SmallBlockTypeLocked, al
   je   @PrepareForSpinLoop
   lock xchg TSmallBlockType([ebx]).SmallBlockTypeLocked, al
   cmp  al, cLockByteLocked
@@ -9549,7 +9787,7 @@ for flags like IsMultiThreaded or MediumBlocksLocked}
   push edx
   {$ifdef AsmCodeAlign}.align 8{$endif}
 @LockSmallBlockTypeLoop:
-  mov  edx, 5000
+  mov  edx, cSpinWaitLoopCount
   mov  eax, cLockByteLocked
   {$ifdef AsmCodeAlign}.align 16{$endif}
 @DidntLock:
@@ -9558,7 +9796,8 @@ for flags like IsMultiThreaded or MediumBlocksLocked}
   jz   @SwitchToThread // for static branch prediction, jump forward means "unlikely"
   db $F3, $90 // pause
  {$ifndef DebugAcquireLockByte}
-  cmp  TSmallBlockType([ebx]).SmallBlockTypeLocked, al       // we are using faster, normal load to not consume the resources and only after it is ready, do once again interlocked exchange
+// use the "test, test-and-set" technique, details are in the comment section at the beginning of the file
+  cmp  TSmallBlockType([ebx]).SmallBlockTypeLocked, al
   je   @NormalLoadLoop // for static branch prediction, jump backwards means "likely"
  {$else}
   mov  al, TSmallBlockType([ebx]).SmallBlockTypeLocked
@@ -9592,9 +9831,12 @@ for flags like IsMultiThreaded or MediumBlocksLocked}
 
 {$else !SmallBlocksLockedCriticalSection}
 
+{ The 32-bit implemenation from the original FastMM4 that employs a loop of Sleep() or SwitchToThread().
+By default, it will not be compiled into FastMM4-AVX which uses more efficient approach.}
+@LockSmallBlockTypeLoop:
   mov eax, (cLockbyteLocked shl 8) or cLockByteAvailable
   {Attempt to grab the block type}
-  lock cmpxchg TSmallBlockType([ebx]).SmallBlockTypeLocked, ah {cmpxchg also implicitly uses the al register}
+  lock cmpxchg TSmallBlockType([ebx]).SmallBlockTypeLocked, ah  // cmpxchg also uses AL as an implicit operand
   je @GotLockOnSmallBlockType
 {$ifdef NeverSleepOnThreadContention}
   {Pause instruction (improves performance on P4)}
@@ -9620,7 +9862,7 @@ for flags like IsMultiThreaded or MediumBlocksLocked}
   {Try again}
   mov eax, (cLockbyteLocked shl 8) or cLockByteAvailable
   {Attempt to grab the block type}
-  lock cmpxchg TSmallBlockType([ebx]).SmallBlockTypeLocked, ah
+  lock cmpxchg TSmallBlockType([ebx]).SmallBlockTypeLocked, ah  // cmpxchg also uses AL as an implicit operand
   je @GotLockOnSmallBlockType
   {Couldn't grab the block type - sleep and try again}
   push ecx
@@ -9634,6 +9876,8 @@ for flags like IsMultiThreaded or MediumBlocksLocked}
 {$endif}
 
 {$endif !SmallBlocksLockedCriticalSection}
+
+{===== END OF SMALL BLOCK LOCKING CODE; 32-BIT FASTFREEMEM =====}
 
 
   {---------------------Medium blocks------------------------------}
@@ -9668,9 +9912,9 @@ for flags like IsMultiThreaded or MediumBlocksLocked}
   test ebp, (UnsignedBit shl StateBitMultithreaded)
   jz @MediumBlocksLocked
 {$endif}
-  {$ifndef Use32BitAsmForLockMediumBlocks} push ecx; push edx {$endif}
+  {$ifndef UseOriginalFastMM4_LockMediumBlocksAsm} push ecx; push edx {$endif}
   call LockMediumBlocks
-  {$ifndef Use32BitAsmForLockMediumBlocks} pop edx; pop ecx {$endif}
+  {$ifndef UseOriginalFastMM4_LockMediumBlocksAsm} pop edx; pop ecx {$endif}
   or ebp, (UnsignedBit shl StateBitMediumLocked)
   {$ifdef AsmCodeAlign}.align 8{$endif}
 @MediumBlocksLocked:
@@ -9831,9 +10075,9 @@ end;
 {---------------64-bit BASM FastFreeMem---------------}
 assembler;
 asm
-  {Do not put ".noframe" here, for the reasons given explained at the comment
-  at the "BinMediumSequentialFeedRemainder" function at the start of the
-  64-bit BASM code}
+  {Do not put ".noframe" here, for the reasons given at the comment
+  in the "BinMediumSequentialFeedRemainder" function at the start of the
+  64-bit assembly code}
   {$ifdef AllowAsmParams}
   .params 3
   .pushnv rbx
@@ -9980,7 +10224,8 @@ asm
    mov  eax, cLockByteLocked
 
    {$ifndef DebugAcquireLockByte}
-   cmp  TSmallBlockType([rbx]).SmallBlockTypeLocked, al       // we are using faster, normal load to not consume the resources and only after it is ready, do once again interlocked exchange
+// use the "test, test-and-set" technique, details are in the comment section at the beginning of the file
+   cmp  TSmallBlockType([rbx]).SmallBlockTypeLocked, al
    je   @PrepareForSpinLoop
    {$else}
    mov  al, TSmallBlockType([rbx]).SmallBlockTypeLocked
@@ -10002,7 +10247,7 @@ asm
   {$ifdef AsmCodeAlign}.align 8{$endif}
 @LockSmallBlockTypeLoop:
    mov  eax, cLockByteLocked
-   mov  edx, 5000
+   mov  edx, cSpinWaitLoopCount
   {$ifdef AsmCodeAlign}.align 16{$endif}
 @DidntLock:
 @NormalLoadLoop:
@@ -10010,7 +10255,8 @@ asm
    jz   @SwitchToThread // for static branch prediction, jump forward means "unlikely"
    db   $F3, $90 // pause
    {$ifndef DebugAcquireLockByte}
-   cmp  TSmallBlockType([rbx]).SmallBlockTypeLocked, al       // we are using faster, normal load to not consume the resources and only after it is ready, do once again interlocked exchange
+// use the "test, test-and-set" technique, details are in the comment section at the beginning of the file
+   cmp  TSmallBlockType([rbx]).SmallBlockTypeLocked, al
    je   @NormalLoadLoop // for static branch prediction, jump backwards means "likely"
    {$else}
    mov  al, TSmallBlockType([rbx]).SmallBlockTypeLocked
@@ -10034,13 +10280,16 @@ asm
 
 {$else !SmallBlocksLockedCriticalSection}
 
+{ The 64-bit implemenation from the original FastMM4 that employs a loop of Sleep() or SwitchToThread().
+By default, it will not be compiled into FastMM4-AVX which uses more efficient approach.}
+@LockSmallBlockTypeLoop:
   mov eax, (cLockbyteLocked shl 8) or cLockByteAvailable
   {Attempt to grab the block type}
-  lock cmpxchg TSmallBlockType([rbx]).SmallBlockTypeLocked, ah
+  lock cmpxchg TSmallBlockType([rbx]).SmallBlockTypeLocked, ah  // cmpxchg also uses AL as an implicit operand
   je @GotLockOnSmallBlockType
 {$ifdef NeverSleepOnThreadContention}
   {Pause instruction (improves performance on P4)}
-  pause
+  db $F3, $90 // pause
   {$ifdef UseSwitchToThread}
   mov rsi, rcx
   call SwitchToThreadIfSupported
@@ -10059,7 +10308,7 @@ asm
   {Try again}
   mov eax, (cLockbyteLocked shl 8) or cLockByteAvailable
   {Attempt to grab the block type}
-  lock cmpxchg TSmallBlockType([rbx]).SmallBlockTypeLocked, ah
+  lock cmpxchg TSmallBlockType([rbx]).SmallBlockTypeLocked, ah  // cmpxchg also uses AL as an implicit operand
   je @GotLockOnSmallBlockType
   {Couldn't grab the block type - sleep and try again}
   mov rsi, rcx
@@ -10073,8 +10322,7 @@ asm
 
 {$endif !SmallBlocksLockedCriticalSection}
 
-{===== END OF SMALL BLOCK LOCKING CODE =====}
-
+{===== END OF SMALL BLOCK LOCKING CODE; 64-BIT FASTFREEMEM =====}
 
   {---------------------Medium blocks------------------------------}
   {$ifdef AsmCodeAlign}.align 8{$endif}
@@ -10292,7 +10540,6 @@ var
   LPNextBlockHeader: Pointer;
   LSecondSplitSize: NativeUInt;
 
-
   procedure MediumBlockInPlaceUpsize;
   var
     LSum: NativeUInt;
@@ -10360,7 +10607,7 @@ var
     if IsMultiThread then
     begin
       LWasMultiThreadMediumBlocks := True;
-    {$ifdef LogLockContention}LDidSleep := {$endif}LockMediumBlocks();
+    {$ifdef LogLockContention}LDidSleep := {$endif}LockMediumBlocks;
   {$ifdef LogLockContention}
       if LDidSleep then
         LCollector := @MediumBlockCollector;
@@ -10373,7 +10620,7 @@ var
     {Is the next block in use?}
     LPNextBlock := PNativeUInt(PByte(APointer) + LOldAvailableSize + BlockHeaderSize);
     LNextBlockSizeAndFlags := PNativeUInt(PByte(LPNextBlock) - BlockHeaderSize)^;
-    if LNextBlockSizeAndFlags and IsFreeBlockFlag = 0 then
+    if (LNextBlockSizeAndFlags and IsFreeBlockFlag) = 0 then
     begin
       {The next block is in use: flag its previous block as free}
       PNativeUInt(PByte(LPNextBlock) - BlockHeaderSize)^ :=
@@ -10450,7 +10697,7 @@ begin
   {Get the block header: Is it actually a small block?}
   LBlockHeader := PNativeUInt(PByte(APointer) - BlockHeaderSize)^;
   {Is it a small block that is in use?}
-  if LBlockHeader and (IsFreeBlockFlag or IsMediumBlockFlag or IsLargeBlockFlag) = 0 then
+  if ((LBlockHeader and (IsFreeBlockFlag or IsMediumBlockFlag or IsLargeBlockFlag))) = 0 then
   begin
     {-----------------------------------Small block-------------------------------------}
     {The block header is a pointer to the block pool: Get the block type}
@@ -10529,7 +10776,7 @@ begin
   else
   begin
     {Is this a medium block or a large block?}
-    if LBlockHeader and (IsFreeBlockFlag or IsLargeBlockFlag) = 0 then
+    if ((LBlockHeader and (IsFreeBlockFlag or IsLargeBlockFlag))) = 0 then
     begin
       {-------------------------------Medium block--------------------------------------}
       {What is the available size in the block being reallocated?}
@@ -10544,7 +10791,7 @@ begin
         {Can we do an in-place upsize?}
         LNextBlockSizeAndFlags := PNativeUInt(PByte(LPNextBlock) - BlockHeaderSize)^;
         {Is the next block free?}
-        if LNextBlockSizeAndFlags and IsFreeBlockFlag <> 0 then
+        if (LNextBlockSizeAndFlags and IsFreeBlockFlag) <> 0 then
         begin
           LNextBlockSize := LNextBlockSizeAndFlags and DropMediumAndLargeFlagsMask;
           {The available size including the next block}
@@ -10563,7 +10810,7 @@ begin
                information on the blocks.}
               LWasMediumBlockLocked := True;
 
-               {$ifdef LogLockContention}LDidSleep := {$endif}LockMediumBlocks();
+               {$ifdef LogLockContention}LDidSleep := {$endif}LockMediumBlocks;
 {$ifdef LogLockContention}
               if LDidSleep then
                 LCollector := @MediumBlockCollector;
@@ -10577,7 +10824,7 @@ begin
               {The available size including the next block}
               LNewAvailableSize := LOldAvailableSize + LNextBlockSize;
               {Is the next block still free and the size still sufficient?}
-              if (LNextBlockSizeAndFlags and IsFreeBlockFlag <> 0)
+              if ((LNextBlockSizeAndFlags and IsFreeBlockFlag) <> 0)
                 and (NativeUInt(ANewSize) <= LNewAvailableSize) then
               begin
                 {Upsize the block in-place}
@@ -10647,7 +10894,7 @@ begin
       else
       begin
         {Must be less than half the current size or we don't bother resizing.}
-        if NativeUInt(ANewSize * 2) >= LOldAvailableSize then
+        if (NativeUInt(ANewSize) shl 1) >= LOldAvailableSize then
         begin
           Result := APointer;
         end
@@ -10710,7 +10957,7 @@ begin
     else
     begin
       {Is this a valid large block?}
-      if LBlockHeader and (IsFreeBlockFlag or IsMediumBlockFlag) = 0 then
+      if (LBlockHeader and (IsFreeBlockFlag or IsMediumBlockFlag)) = 0 then
       begin
         {-----------------------Large block------------------------------}
         Result := ReallocateLargeBlock(APointer, ANewSize);
@@ -10964,11 +11211,11 @@ asm
   jz @DoMediumInPlaceDownsize
 {$endif}
 //@DoMediumLockForDownsize:
-  {When ussing Use32BitAsmForLockMediumBlocks, it preserves all registers
+  {When ussing UseOriginalFastMM4_LockMediumBlocksAsm, it preserves all registers
   (except eax), including ecx}
-  {$ifndef Use32BitAsmForLockMediumBlocks} push ecx; push edx {$endif}
+  {$ifndef UseOriginalFastMM4_LockMediumBlocksAsm} push ecx; push edx {$endif}
   call LockMediumBlocks
-  {$ifndef Use32BitAsmForLockMediumBlocks} pop edx; pop ecx {$endif}
+  {$ifndef UseOriginalFastMM4_LockMediumBlocksAsm} pop edx; pop ecx {$endif}
   or byte ptr ss:[esp+cLocalVarStackOfsMediumBlock], (UnsignedBit shl StateBitMediumLocked)
 
   {Reread the flags - they may have changed before medium blocks could be
@@ -11080,9 +11327,9 @@ asm
 {$endif}
 //@DoMediumLockForUpsize:
   {Lock the medium blocks (ecx and edx *must* be preserved}
-  {$ifndef Use32BitAsmForLockMediumBlocks} push ecx; push edx {$endif}
+  {$ifndef UseOriginalFastMM4_LockMediumBlocksAsm} push ecx; push edx {$endif}
   call LockMediumBlocks
-  {$ifndef Use32BitAsmForLockMediumBlocks} pop edx; pop ecx {$endif}
+  {$ifndef UseOriginalFastMM4_LockMediumBlocksAsm} pop edx; pop ecx {$endif}
   or byte ptr ss:[esp+cLocalVarStackOfsMediumBlock], (UnsignedBit shl StateBitMediumLocked)
   {Re-read the info for this block (since it may have changed before the medium
    blocks could be locked)}
@@ -11283,9 +11530,9 @@ end;
 {-----------------64-bit BASM FastReallocMem-----------------}
 assembler;
 asm
-  {Do not put ".noframe" here, for the reasons given explained at the comment
-  at the "BinMediumSequentialFeedRemainder" function at the start of the
-  64-bit BASM code}
+  {Do not put ".noframe" here, for the reasons given at the comment
+  in the "BinMediumSequentialFeedRemainder" function at the start of the
+  64-bit assembler code}
   {$ifdef AllowAsmParams}
   .params 3
   .pushnv rbx
@@ -12240,7 +12487,7 @@ asm
     eax = CompareVal,
     edx = NewVal,
     ecx = AAddress}
-    lock cmpxchg [ecx], edx
+    lock cmpxchg [ecx], edx  // cmpxchg also uses EAX as an implicit operand
     xor edx, edx {Clear the edx and ecx value on exit just for safety}
     xor ecx, ecx
 {$else}
@@ -12249,9 +12496,9 @@ asm
     ecx = CompareVal,
     edx = NewVal,
     r8 = AAddress}
-    mov eax, ecx // higher bits 63-32 are automatically cleared
+    mov eax, ecx  // higher bits (63-32) are automatically cleared
     xor ecx, ecx {Clear the ecx value on entry just for safety, after we had save the value to eax}
-    lock cmpxchg [r8], edx
+    lock cmpxchg [r8], edx  // cmpxchg also uses EAX as an implicit operand
     xor edx, edx
     xor r8, r8
 {$endif}
@@ -14122,7 +14369,9 @@ const
    string. #9 = Tab.}
   MinCharCode = #9;
 var
-  LStringLength, LElemSize, LCharInd: Integer;
+  LStringLength,
+  LElemSize,
+  LCharInd: Integer;
   LPAnsiStr: PAnsiChar;
   LPUniStr: PWideChar;
 begin
@@ -14212,7 +14461,8 @@ var
   LPLargeBlock: PLargeBlockHeader;
   LBlockSize: NativeInt;
   LPSmallBlockPool: PSmallBlockPoolHeader;
-  LCurPtr, LEndPtr: Pointer;
+  LCurPtr,
+  LEndPtr: Pointer;
   LInd: Integer;
 {$ifdef LogLockContention}
   LDidSleep: Boolean;
@@ -14228,7 +14478,7 @@ begin
   if IsMultiThread then
   begin
     LMediumBlocksLocked := True;
-    {$ifdef LogLockContention}LDidSleep := {$endif}LockMediumBlocks();
+    {$ifdef LogLockContention}LDidSleep := {$endif}LockMediumBlocks;
   end;
   try
     {Step through all the medium block pools}
@@ -14240,7 +14490,7 @@ begin
       begin
         LMediumBlockHeader := PNativeUInt(PByte(LPMediumBlock) - BlockHeaderSize)^;
         {Is the block in use?}
-        if LMediumBlockHeader and IsFreeBlockFlag = 0 then
+        if (LMediumBlockHeader and IsFreeBlockFlag) = 0 then
         begin
           if (LMediumBlockHeader and IsSmallBlockPoolInUseFlag) <> 0 then
           begin
@@ -14292,7 +14542,7 @@ begin
     LLargeBlocksLocked := True;
     {Step through all the large blocks}
     {$ifdef LogLockContention}LDidSleep :={$endif}
-    LockLargeBlocks();
+    LockLargeBlocks;
   end;
   try
     {Get all leaked large blocks}
@@ -14347,9 +14597,11 @@ type
 {LogMemoryManagerStateToFile callback subroutine}
 procedure LogMemoryManagerStateCallBack(APBlock: Pointer; ABlockSize: NativeInt; AUserData: Pointer);
 var
-  LClass, LClassHashBits: NativeUInt;
+  LClass,
+  LClassHashBits: NativeUInt;
   LPLogInfo: PMemoryLogInfo;
-  LPParentNode, LPClassNode: PMemoryLogNode;
+  LPParentNode,
+  LPClassNode: PMemoryLogNode;
   LChildNodeDirection: Boolean;
 begin
   LPLogInfo := AUserData;
@@ -14358,7 +14610,7 @@ begin
   LClass := PNativeUInt(APBlock)^;
   {Do some basic pointer checks: The "class" must be dword aligned and beyond 64K}
   if (LClass > 65535)
-    and (LClass and 3 = 0) then
+    and ((LClass and 3) = 0) then
   begin
     LPParentNode := @LPLogInfo.RootNode;
     LClassHashBits := LClass;
@@ -14430,7 +14682,8 @@ end;
 procedure QuickSortLogNodes(APLeftItem: PMemoryLogNodes; ARightIndex: Integer);
 var
   M, I, J: Integer;
-  LPivot, LTempItem: TMemoryLogNode;
+  LPivot,
+  LTempItem: TMemoryLogNode;
   PMemLogNode: PMemoryLogNode; {This variable is just neede to simplify the accomodation
                                 to "typed @ operator" - stores an intermediary value}
 begin
@@ -14538,13 +14791,16 @@ const
   AverageSizeLeadText = ' (';
   AverageSizeTrailingText = ' bytes avg.)'#13#10;
 var
-  LUMsg, LUBuf: NativeUInt;
+  LUMsg,
+  LUBuf: NativeUInt;
   LPLogInfo: PMemoryLogInfo;
   LInd: Integer;
   LPNode: PMemoryLogNode;
   LMsgBuffer: array[0..MsgBufferSize - 1] of AnsiChar;
-  LPInitialMsgPtr, LPMsg: PAnsiChar;
-  LBufferSpaceUsed, LBytesWritten: Cardinal;
+  LPInitialMsgPtr,
+  LPMsg: PAnsiChar;
+  LBufferSpaceUsed,
+  LBytesWritten: Cardinal;
   LFileHandle: THandle; {use NativeUint if THandle is not available}
   LMemoryManagerUsageSummary: TMemoryManagerUsageSummary;
   LUTF8Str: AnsiString;
@@ -14651,7 +14907,9 @@ begin
             end;
           end;
           if AAdditionalDetails <> '' then
+          begin
             LPMsg := AppendStringToBuffer(LogStateAdditionalInfoMsg, LPMsg, Length(LogStateAdditionalInfoMsg), LInitialSize-NativeUInt(LPMsg-LPInitialMsgPtr));
+          end;
           {Flush any remaining bytes}
           LUMsg := NativeUInt(LPMsg);
           LUBuf := NativeUInt(@LMsgBuffer);
@@ -14968,7 +15226,7 @@ begin
     begin
       LMediumBlockHeader := PNativeUInt(PByte(LPMediumBlock) - BlockHeaderSize)^;
       {Is the block in use?}
-      if LMediumBlockHeader and IsFreeBlockFlag = 0 then
+      if (LMediumBlockHeader and IsFreeBlockFlag) = 0 then
       begin
 {$ifdef EnableMemoryLeakReporting}
         if ACheckForLeakedBlocks then
@@ -15247,12 +15505,15 @@ procedure GetMemoryManagerState(var AMemoryManagerState: TMemoryManagerState);
 const
   BlockHeaderSizeWithAnyOverhead = BlockHeaderSize{$ifdef FullDebugMode} + FullDebugBlockOverhead{$endif};
 var
-  LIndBlockSize, LUsableBlockSize: Cardinal;
+  LIndBlockSize,
+  LUsableBlockSize: Cardinal;
   LPMediumBlockPoolHeader: PMediumBlockPoolHeader;
   LPMediumBlock: Pointer;
   LInd: Integer;
-  LBlockTypeIndex, LMediumBlockSize: Cardinal;
-  LMediumBlockHeader, LLargeBlockSize: NativeUInt;
+  LBlockTypeIndex,
+  LMediumBlockSize: Cardinal;
+  LMediumBlockHeader,
+  LLargeBlockSize: NativeUInt;
   LPLargeBlock: PLargeBlockHeader;
 {$ifdef LogLockContention}
   LDidSleep: Boolean;
@@ -15284,7 +15545,7 @@ begin
     LockAllSmallBlockTypes;
     {Lock the medium blocks}
     LMediumBlocksLocked := True;
-    {$ifdef LogLockContention}LDidSleep := {$endif}LockMediumBlocks();
+    {$ifdef LogLockContention}LDidSleep := {$endif}LockMediumBlocks;
   end;
   {Step through all the medium block pools}
   LPMediumBlockPoolHeader := MediumBlockPoolsCircularList.NextMediumBlockPoolHeader;
@@ -15297,7 +15558,7 @@ begin
     begin
       LMediumBlockHeader := PNativeUInt(PByte(LPMediumBlock) - BlockHeaderSize)^;
       {Is the block in use?}
-      if LMediumBlockHeader and IsFreeBlockFlag = 0 then
+      if (LMediumBlockHeader and IsFreeBlockFlag) = 0 then
       begin
         {Get the block size}
         LMediumBlockSize := LMediumBlockHeader and DropMediumAndLargeFlagsMask;
@@ -15350,7 +15611,7 @@ begin
     LLargeBlocksLocked := True;
     {Step through all the large blocks}
     {$ifdef LogLockContention}LDidSleep:={$endif}
-    LockLargeBlocks();
+    LockLargeBlocks;
   end;
   LPLargeBlock := LargeBlocksCircularList.NextLargeBlockHeader;
   while LPLargeBlock <> @LargeBlocksCircularList do
@@ -15370,20 +15631,18 @@ begin
 end;
 
 {Returns a summary of the information returned by GetMemoryManagerState}
-procedure GetMemoryManagerUsageSummary(
-  var AMemoryManagerUsageSummary: TMemoryManagerUsageSummary);
+function GetMemoryManagerUsageSummary: TMemoryManagerUsageSummary;
 var
   LMMS: TMemoryManagerState;
-  LAllocatedBytes, LReservedBytes: NativeUInt;
+  LAllocatedBytes,
+  LReservedBytes: NativeUInt;
   LSBTIndex: Integer;
 begin
   {Get the memory manager state}
   GetMemoryManagerState(LMMS);
   {Add up the totals}
-  LAllocatedBytes := LMMS.TotalAllocatedMediumBlockSize
-    + LMMS.TotalAllocatedLargeBlockSize;
-  LReservedBytes := LMMS.ReservedMediumBlockAddressSpace
-    + LMMS.ReservedLargeBlockAddressSpace;
+  LAllocatedBytes := LMMS.TotalAllocatedMediumBlockSize + LMMS.TotalAllocatedLargeBlockSize;
+  LReservedBytes := LMMS.ReservedMediumBlockAddressSpace + LMMS.ReservedLargeBlockAddressSpace;
   for LSBTIndex := 0 to NumSmallBlockTypes - 1 do
   begin
     Inc(LAllocatedBytes, LMMS.SmallBlockTypeStates[LSBTIndex].UseableBlockSize
@@ -15391,15 +15650,17 @@ begin
     Inc(LReservedBytes, LMMS.SmallBlockTypeStates[LSBTIndex].ReservedAddressSpace);
   end;
   {Set the structure values}
-  AMemoryManagerUsageSummary.AllocatedBytes := LAllocatedBytes;
-  AMemoryManagerUsageSummary.OverheadBytes := LReservedBytes - LAllocatedBytes;
+  Result.AllocatedBytes := LAllocatedBytes;
+  Result.OverheadBytes := LReservedBytes - LAllocatedBytes;
   if LReservedBytes > 0 then
-  begin
-    AMemoryManagerUsageSummary.EfficiencyPercentage :=
-      LAllocatedBytes / LReservedBytes * 100;
-  end
+    Result.EfficiencyPercentage := LAllocatedBytes / LReservedBytes * 100
   else
-    AMemoryManagerUsageSummary.EfficiencyPercentage := 100;
+    Result.EfficiencyPercentage := 100;
+end;
+
+procedure GetMemoryManagerUsageSummary(var AMemoryManagerUsageSummary: TMemoryManagerUsageSummary);
+begin
+  AMemoryManagerUsageSummary := GetMemoryManagerUsageSummary;
 end;
 
 {$ifndef POSIX}
@@ -15409,7 +15670,10 @@ procedure GetMemoryMap(var AMemoryMap: TMemoryMap);
 var
   LPMediumBlockPoolHeader: PMediumBlockPoolHeader;
   LPLargeBlock: PLargeBlockHeader;
-  LIndNUI, LChunkIndex, LNextChunk, LLargeBlockSize: NativeUInt;
+  LIndNUI,
+  LChunkIndex,
+  LNextChunk,
+  LLargeBlockSize: NativeUInt;
   LMBI: TMemoryBasicInformation;
   LCharToFill: AnsiChar;
 {$ifdef LogLockContention}
@@ -15426,7 +15690,7 @@ begin
   if IsMultiThread then
   begin
     LMediumBlocksLocked := True;
-    {$ifdef LogLockContention}LDidSleep := {$endif}LockMediumBlocks();
+    {$ifdef LogLockContention}LDidSleep := {$endif}LockMediumBlocks;
   end;
   LPMediumBlockPoolHeader := MediumBlockPoolsCircularList.NextMediumBlockPoolHeader;
   while LPMediumBlockPoolHeader <> @MediumBlockPoolsCircularList do
@@ -15452,7 +15716,7 @@ begin
   begin
     LLargeBlocksLocked := True;
     {$ifdef LogLockContention}LDidSleep:={$endif}
-    LockLargeBlocks();
+    LockLargeBlocks;
   end;
   LPLargeBlock := LargeBlocksCircularList.NextLargeBlockHeader;
   while LPLargeBlock <> @LargeBlocksCircularList do
@@ -15490,7 +15754,7 @@ begin
         Break;
       end;
       {Get the chunk number after the region}
-      LNextChunk := (LMBI.RegionSize - 1) shr 16 + LIndNUI + 1;
+      LNextChunk := ((LMBI.RegionSize - 1) shr 16) + LIndNUI + 1;
       {Validate}
       if LNextChunk > 65536 then
         LNextChunk := 65536;
@@ -15537,8 +15801,12 @@ function FastGetHeapStatus: THeapStatus;
 var
   LPMediumBlockPoolHeader: PMediumBlockPoolHeader;
   LPMediumBlock: Pointer;
-  LBlockTypeIndex, LMediumBlockSize: Cardinal;
-  LSmallBlockUsage, LSmallBlockOverhead, LMediumBlockHeader, LLargeBlockSize: NativeUInt;
+  LBlockTypeIndex,
+  LMediumBlockSize: Cardinal;
+  LSmallBlockUsage,
+  LSmallBlockOverhead,
+  LMediumBlockHeader,
+  LLargeBlockSize: NativeUInt;
   LInd: Integer;
   LPLargeBlock: PLargeBlockHeader;
 {$ifdef LogLockContention}
@@ -15557,7 +15825,7 @@ begin
   if IsMultiThread then
   begin
     LMediumBlocksLocked := True;
-    {$ifdef LogLockContention}LDidSleep := {$endif}LockMediumBlocks();
+    {$ifdef LogLockContention}LDidSleep := {$endif}LockMediumBlocks;
   end;
   {Step through all the medium block pools}
   LPMediumBlockPoolHeader := MediumBlockPoolsCircularList.NextMediumBlockPoolHeader;
@@ -15578,7 +15846,7 @@ begin
       {Get the block size}
       LMediumBlockSize := LMediumBlockHeader and DropMediumAndLargeFlagsMask;
       {Is the block in use?}
-      if LMediumBlockHeader and IsFreeBlockFlag = 0 then
+      if (LMediumBlockHeader and IsFreeBlockFlag) = 0 then
       begin
         if (LMediumBlockHeader and IsSmallBlockPoolInUseFlag) <> 0 then
         begin
@@ -15641,7 +15909,7 @@ begin
     LLargeBlocksLocked := True;
     {Step through all the large blocks}
     {$ifdef LogLockContention}LDidSleep:={$endif}
-    LockLargeBlocks();
+    LockLargeBlocks;
   end;
   LPLargeBlock := LargeBlocksCircularList.NextLargeBlockHeader;
   while LPLargeBlock <> @LargeBlocksCircularList do
@@ -15665,12 +15933,28 @@ begin
   Result.TotalFree := Result.FreeSmall + Result.FreeBig + Result.Unused;
 end;
 
+{$ifdef fpc}
+function FastGetFPCHeapStatus: TFPCHeapStatus; //support get TFPCHeapStatus
+var
+  HS: THeapStatus;
+begin
+  HS := FastGetHeapStatus;
+  Result.MaxHeapSize  := HS.TotalAddrSpace;
+  Result.MaxHeapUsed  := HS.TotalAllocated;
+  Result.CurrHeapSize := HS.TotalAddrSpace;
+  Result.CurrHeapUsed := HS.TotalAllocated;
+  Result.CurrHeapFree := HS.TotalFree;
+end;
+{$endif}
+
 {Frees all allocated memory. Does not support segmented large blocks (yet).}
 procedure FreeAllMemory;
 var
-  LPMediumBlockPoolHeader, LPNextMediumBlockPoolHeader: PMediumBlockPoolHeader;
+  LPMediumBlockPoolHeader,
+  LPNextMediumBlockPoolHeader: PMediumBlockPoolHeader;
   LPMediumFreeBlock: PMediumFreeBlock;
-  LPLargeBlock, LPNextLargeBlock: PLargeBlockHeader;
+  LPLargeBlock,
+  LPNextLargeBlock: PLargeBlockHeader;
   LPSmallBlockPoolHeader: PSmallBlockPoolHeader; {This is needed for simplicity, to
 												  mitigate typecasts when used "typed @".}
   LPSmallBlockType: PSmallBlockType;
@@ -15737,6 +16021,25 @@ begin
   LargeBlocksCircularList.NextLargeBlockHeader := @LargeBlocksCircularList;
 end;
 
+{Returns the current installation state of the memory manager.}
+function FastMM_GetInstallationState: TFastMM_MemoryManagerInstallationState;
+begin
+  if IsMemoryManagerSet then
+  begin
+    if FastMMIsInstalled then
+    begin
+      if IsMemoryManagerOwner then
+        Result := mmisInstalled
+      else
+        Result := mmisUsingSharedMemoryManager;
+    end
+    else
+      Result := mmisOtherThirdPartyMemoryManagerInstalled
+  end
+  else
+    Result := mmisDefaultMemoryManagerInUse;
+end;
+
 {$ifdef LogLockContention}
 procedure ReportLockContention;
 var
@@ -15785,8 +16088,10 @@ begin
       LMsgPtr := LogStackTrace(PNativeUInt(@(mergedData[i].Data.Pointers[1])), mergedData[i].Data.Count, LMsgPtr);
       LMsgPtr := AppendStringToBuffer(CRLF, LMsgPtr, Length(CRLF), LInitialSize-NativeUInt(LMsgPtr-LInitialPtr));
     end;
+{$ifndef NoMessageBoxes}
     AppendStringToModuleName(LockingReportTitle, LMessageTitleBuffer, Length(LockingReportTitle), (SizeOf(LMessageTitleBuffer) div SizeOf(LMessageTitleBuffer[0]))-1);
     ShowMessageBox(LErrorMessage, LMessageTitleBuffer);
+{$endif}
     for i := 4 to 10 do
     begin
       if i > mergedCount then
@@ -16152,6 +16457,7 @@ begin
   end;
   {Has another MM been set, or has the Embarcadero MM been used? If so, this
    file is not the first unit in the uses clause of the project's .dpr file.}
+
   if IsMemoryManagerSet then
   begin
     {When using runtime packages, another library may already have installed
@@ -16168,6 +16474,7 @@ begin
 {$endif}
     Exit;
   end;
+
 {$ifndef POSIX}
   HeapTotalAllocated := GetHeapStatus.TotalAllocated;
   {$ifdef FPC}
@@ -16193,20 +16500,25 @@ end;
 
 {Initializes the lookup tables for the memory manager}
 procedure InitializeMemoryManager;
+{$ifdef FullDebugMode}
 const
   {The size of the Inc(VMTIndex) code in TFreedObject.GetVirtualMethodIndex}
   VMTIndexIncCodeSize = 6;
+{$endif}
+
+{$ifdef EnableAVX}
 
 const
-  {XCR0[2:1] = ‘11b’ (XMM state and YMM state are enabled by OS).}
-  cXcrXmmAndYmmMask = (4-1) shl 1;
+  {XCR0[2:1] = '11b' (XMM state and YMM state are enabled by OS).}
+  CXcrXmmAndYmmMask = (4-1) shl 1;
 
 {$ifdef EnableAVX512}
 const
-  {XCR0[7:5] = ‘111b’ (OPMASK state, upper 256-bit of ZMM0-ZMM15 and ZMM16-ZMM31 state are enabled by OS).}
-  cXcrZmmMask       = (8-1) shl 5;
-{$endif}
+  {XCR0[7:5] = '111b' (OPMASK state, upper 256-bit of ZMM0-ZMM15 and ZMM16-ZMM31 state are enabled by OS).}
+  CXcrZmmMask       = (8-1) shl 5;
+{$endif EnableAVX512}
 
+{$endif EnableAVX}
 
 {$ifdef Use_GetEnabledXStateFeatures_WindowsAPICall}
 type
@@ -16227,7 +16539,11 @@ var
   LReg0, LReg1, LReg7_0: TCpuIdRegisters;
 {$endif}
 
-  LInd, LSizeInd, LMinimumPoolSize, LOptimalPoolSize, LGroupNumber,
+  LInd,
+  LSizeInd,
+  LMinimumPoolSize,
+  LOptimalPoolSize,
+  LGroupNumber,
   LBlocksPerPool, LPreviousBlockSize: Cardinal;
   LPMediumFreeBlock: PMediumFreeBlock;
 {$ifdef FullDebugMode}
@@ -16243,8 +16559,9 @@ var
 {$endif}
 begin
 
+{$ifndef POSIX}
   FSwitchToThread := GetProcAddress(GetModuleHandle(Kernel32), 'SwitchToThread');
-
+{$endif}
 
 {$ifdef FullDebugMode}
   {$ifdef LoadDebugDLLDynamically}
@@ -16304,20 +16621,17 @@ ENDQOTE}
 
 //Basic CPUID Information
 
-    LReg0 := GetCpuId(0, 0);
+    with LReg0   do begin RegEAX := 0; RegEBX := 0; RegECX := 0; RegEDX := 0; end;
+    with LReg1   do begin RegEAX := 0; RegEBX := 0; RegECX := 0; RegEDX := 0; end;
+    with LReg7_0 do begin RegEAX := 0; RegEBX := 0; RegECX := 0; RegEDX := 0; end;
+
+    GetCPUID(0, 0, LReg0);
     MaxInputValueBasic := LReg0.RegEax;
     if MaxInputValueBasic > 0 then
     begin
-
       if MaxInputValueBasic > 7 then
       begin
-        LReg7_0 := GetCpuId(7, 0);
-      end else
-      begin
-        LReg7_0.RegEAX := 0;
-        LReg7_0.RegEBX := 0;
-        LReg7_0.RegECX := 0;
-        LReg7_0.RegEDX := 0;
+        GetCPUID(7, 0, LReg7_0);
       end;
 
 {$ifdef Use_GetEnabledXStateFeatures_WindowsAPICall}
@@ -16343,7 +16657,7 @@ This is because the operating system would not save the registers and the states
       end;
 {$endif}
 
-      LReg1 := GetCpuId(1, 0);
+      GetCPUID(1, 0, LReg1);
 
       if
         ((LReg1.RegEDX and (UnsignedBit shl 26)) <> 0) {SSE2 bit}
@@ -16353,7 +16667,10 @@ This is because the operating system would not save the registers and the states
         instruction supported, we don't have to check for XState/CR0 for PAUSE,
         because PAUSE and other instructions like PREFETCHh, MOVNTI, etc.
         work regardless of the CR0 values}
+
+        {$ifndef POSIX}
         if Assigned(FSwitchToThread) then
+        {$endif}
         begin
           FastMMCpuFeatures := FastMMCpuFeatures or FastMMCpuFeaturePauseAndSwitch;
         end;
@@ -16374,7 +16691,7 @@ This is because the operating system would not save the registers and the states
 { Here is the Intel algorithm to detext AVX
 { QUOTE from the Intel 64 and IA-32 Architectures Optimization Reference Manual
 1) Detect CPUID.1:ECX.OSXSAVE[bit 27] = 1 (XGETBV enabled for application use1)
-2) Issue XGETBV and verify that XCR0[2:1] = ‘11b’ (XMM state and YMM state are enabled by OS).
+2) Issue XGETBV and verify that XCR0[2:1] = '11b' (XMM state and YMM state are enabled by OS).
 3) detect CPUID.1:ECX.AVX[bit 28] = 1 (AVX instructions supported).
 ENDQUOTE}
       if
@@ -16388,8 +16705,8 @@ ENDQUOTE}
 
       {$ifdef EnableAVX}
       if
-         {verify that XCR0[2:1] = ‘11b’ (XMM state and YMM state are enabled by OS).}
-         (CpuXCR0 and cXcrXmmAndYmmMask = cXcrXmmAndYmmMask) and
+         {verify that XCR0[2:1] = '11b' (XMM state and YMM state are enabled by OS).}
+         (CpuXCR0 and CXcrXmmAndYmmMask = CXcrXmmAndYmmMask) and
 
          {verify that CPUID.1:ECX.AVX[bit 28] = 1 (AVX instructions supported)}
          ((LReg1.RegECX and (UnsignedBit shl 28)) <> 0) {AVX bit}
@@ -16415,7 +16732,7 @@ ENDQUOTE}
           // check for AVX-512
         {$ifdef EnableAVX512}
           if
-          ((CpuXCR0 and cXcrZmmMask) = cXcrZmmMask) and
+          ((CpuXCR0 and CXcrZmmMask) = CXcrZmmMask) and
           { Processor support of AVX-512 Foundation instructions is indicated by CPUID.(EAX=07H, ECX=0):EBX.AVX512F[bit16] = 1}
           ((LReg7_0.RegEBX and (1 shl 16)) <> 0)
         {$ifdef Use_GetEnabledXStateFeatures_WindowsAPICall}
@@ -16452,7 +16769,7 @@ ENDQUOTE}
   begin
     for LInd := Low(SmallBlockCriticalSections) to High(SmallBlockCriticalSections) do
     begin
-      InitializeCriticalSection(SmallBlockCriticalSections[LInd]);
+      {$ifdef fpc}InitCriticalSection{$else}InitializeCriticalSection{$endif}(SmallBlockCriticalSections[LInd]);
     end;
   end;
   {$endif}
@@ -16461,7 +16778,7 @@ ENDQUOTE}
 
   for LInd := 0 to High(SmallBlockTypes) do
   begin
-    SmallBlockTypes[LInd].SmallBlockTypeLocked := cLockByteAvailable;
+    SmallBlockTypes[LInd].SmallBlockTypeLocked := CLockByteAvailable;
     {Set the move procedure}
 {$ifdef UseCustomFixedSizeMoveRoutines}
     {The upsize move procedure may move chunks in 16 bytes even with 8-byte
@@ -16475,8 +16792,8 @@ ENDQUOTE}
     if (FastMMCpuFeatures and FastMMCpuFeatureAVX512) <> 0 then
     begin
       case SmallBlockTypes[LInd].BlockSize of
-         32*01: SmallBlockTypes[LInd].UpsizeMoveProcedure := Move24AVX2;
-         32*02: SmallBlockTypes[LInd].UpsizeMoveProcedure := Move56AVX2;
+         32*01: SmallBlockTypes[LInd].UpsizeMoveProcedure := Move24AVX512;
+         32*02: SmallBlockTypes[LInd].UpsizeMoveProcedure := Move56AVX512;
          32*03: SmallBlockTypes[LInd].UpsizeMoveProcedure := Move88AVX512;
          32*04: SmallBlockTypes[LInd].UpsizeMoveProcedure := Move120AVX512;
          32*05: SmallBlockTypes[LInd].UpsizeMoveProcedure := Move152AVX512;
@@ -16655,9 +16972,9 @@ ENDQUOTE}
 
   {-------------------Set up the medium blocks-------------------}
 
-  MediumBlocksLocked := cLockByteAvailable;
+  MediumBlocksLocked := CLockByteAvailable;
   {$ifdef MediumBlocksLockedCriticalSection}
-  InitializeCriticalSection(MediumBlocksLockedCS);
+  {$ifdef fpc}InitCriticalSection{$else}InitializeCriticalSection{$endif}(MediumBlocksLockedCS);
   {$endif}
 
 {$ifdef CheckHeapForCorruption}
@@ -16684,16 +17001,16 @@ ENDQUOTE}
     LPMediumFreeBlock.NextFreeBlock := LPMediumFreeBlock;
   end;
   {------------------Set up the large blocks---------------------}
-  LargeBlocksLocked := cLockByteAvailable;
+  LargeBlocksLocked := CLockByteAvailable;
   {$ifdef LargeBlocksLockedCriticalSection}
-  InitializeCriticalSection(LargeBlocksLockedCS);
+  {$ifdef fpc}InitCriticalSection{$else}InitializeCriticalSection{$endif}(LargeBlocksLockedCS);
   {$endif}
   LargeBlocksCircularList.PreviousLargeBlockHeader := @LargeBlocksCircularList;
   LargeBlocksCircularList.NextLargeBlockHeader := @LargeBlocksCircularList;
   {------------------Set up the debugging structures---------------------}
 
 {$ifdef EnableMemoryLeakReporting}
-  ExpectedMemoryLeaksListLocked := cLockByteAvailable;
+  ExpectedMemoryLeaksListLocked := CLockByteAvailable;
 {$endif}
 
 {$ifdef FullDebugMode}
@@ -16740,11 +17057,14 @@ var
   LChar: AnsiChar;
 {$endif}
 begin
+  {$ifdef fpc}
+   FillChar(NewMemoryManager, SizeOf(NewMemoryManager), 0); // prevents potential undefined behavior on FPC caused by uninitialized data block
+  {$endif}
   if not FastMMIsInstalled then
   begin
 {$ifdef FullDebugMode}
   {$ifdef 32Bit}
-    {Try to reserve the 64K block covering address $80808080}
+    {Try to reserve the 64K block covering address $80808080 so pointers with DebugFillPattern will A/V}
     ReservedBlock := VirtualAlloc(Pointer(DebugReservedAddress), 65536, MEM_RESERVE, PAGE_NOACCESS);
     {Allocate the address space slack.}
     AddressSpaceSlackPtr := VirtualAlloc(nil, FullDebugModeAddressSpaceSlack, MEM_RESERVE or MEM_TOP_DOWN, PAGE_NOACCESS);
@@ -16822,6 +17142,9 @@ begin
       NewMemoryManager.GetMem := DebugGetMem;
       NewMemoryManager.FreeMem := DebugFreeMem;
       NewMemoryManager.ReallocMem := DebugReallocMem;
+{$endif}
+{$ifdef fpc}
+      NewMemoryManager.GetFPCHeapStatus := {$ifdef fpc64bit}@{$endif}FastGetFPCHeapStatus; //support get TFPCHeapStatus
 {$endif}
 {$ifdef BDS2006AndUp}
   {$ifndef FullDebugMode}
@@ -17068,8 +17391,10 @@ end;
 {$endif}
 
 procedure FinalizeMemoryManager;
+{$ifdef SmallBlocksLockedCriticalSection}
 var
   LInd: Integer;
+{$endif}
 begin
   {Restore the old memory manager if FastMM has been installed}
   if FastMMIsInstalled then
@@ -17148,13 +17473,13 @@ begin
     end;
 
   {$ifdef MediumBlocksLockedCriticalSection}
-  LargeBlocksLocked := cLockByteFinished;
-  DeleteCriticalSection(MediumBlocksLockedCS);
+  LargeBlocksLocked := CLockByteFinished;
+  {$ifdef fpc}DoneCriticalSection{$else}DeleteCriticalSection{$endif}(MediumBlocksLockedCS);
   {$endif MediumBlocksLockedCriticalSection}
 
   {$ifdef LargeBlocksLockedCriticalSection}
-  LargeBlocksLocked := cLockByteFinished;
-  DeleteCriticalSection(LargeBlocksLockedCS);
+  LargeBlocksLocked := CLockByteFinished;
+  {$ifdef fpc}DoneCriticalSection{$else}DeleteCriticalSection{$endif}(LargeBlocksLockedCS);
   {$endif LargeBlocksLockedCriticalSection}
 
   {$ifdef SmallBlocksLockedCriticalSection}
@@ -17162,13 +17487,13 @@ begin
   begin
     for LInd := Low(SmallBlockCriticalSections) to High(SmallBlockCriticalSections) do
     begin
-      DeleteCriticalSection(SmallBlockCriticalSections[LInd]);
+      {$ifdef fpc}DoneCriticalSection{$else}DeleteCriticalSection{$endif}(SmallBlockCriticalSections[LInd]);
     end;
   end;
 
   for LInd := Low(SmallBlockTypes) to High(SmallBlockTypes) do
   begin
-    SmallBlockTypes[LInd].SmallBlockTypeLocked := cLockByteFinished;
+    SmallBlockTypes[LInd].SmallBlockTypeLocked := CLockByteFinished;
   end;
   {$endif}
 

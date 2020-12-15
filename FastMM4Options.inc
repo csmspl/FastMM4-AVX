@@ -121,37 +121,49 @@ are better. If you wish to restore old functionality of FastMM4 version 4.992,
 disable this option }
 {$define SimplifiedInterlockedExchangeByte}
 
-{These 3 options make FastMM4-AVX to use a new approach to waiting for a lock:
-CriticalSections instead of Sleep(). With these options, the Sleep() will
-never be used but EnterCriticalSection/LeaveCriticalSection will be
-used instead. Testing has shown that the approach of using CriticalSections
-instead of Sleep (which was used by default before in FastMM4) provides
-significant gain in situations when the number of threads working with the
-memory manager is the same or higher than the number of physical cores.
-This options take away the original FastMM4 approach of using
-Sleep(InitialSleepTime) and then Sleep(AdditionalSleepTime)
-(or Sleep(0) and Sleep(1)) and replace them with
-EnterCriticalSection/LeaveCriticalSection to save valuable CPU cycles wasted by
-Sleep(0) and to improve speed (reduce latency) that was affected each time by
-at least 1 millisecond by Sleep(1), because the Critical Sections are much more
-CPU-friendly and have definitely lower latency than Sleep(1).
 
-When these options are enabled, FastMM4-AVX it checks:
+{These 3 options make FastMM4-AVX use a new approach to waiting for a lock:
+CriticalSections or "pause"-based spin-wait loops instead of Sleep() or 
+SwitchToThread(). 
+Using Sleep(0) or SwitchToThread() while waiting for a lock is a default 
+approach in the original version of FastMM. 
+With the new approach, the Sleep() will never be called, and SwitchToThread()
+may only be called after 5000 cycles of "pause"-based spin-wait loop. 
+Testing has shown that the new approach provides significant gain in 
+multi-threaded scenarios, especially in situations when the number of threads
+working with the memory manager is the same or higher than the number of 
+physical cores. 
+Critical Sections or "pause"-based spin-wait loops implemented as 
+"test, test-and-set" are much more CPU-friendly and have definitely lower 
+latency than Sleep() or SwitchToThread(). 
+
+When these options are enabled, FastMM4-AVX checks:
  - whether the CPU supports SSE2 and thus the "pause" instruction, and
  - whether the operating system has the SwitchToThread() API call, and,
- and in this case uses "pause" spin-loop for 5000 iterations and then
+if both of the above conditions are met, uses
+"pause"-based spin-wait loops for 5000 iterations and then
 SwitchToThread() instead of critical sections; If a CPU doesn't have the
 "pause" instrcution or Windows doesn't have the SwitchToThread() API
 function, it will use EnterCriticalSection/LeaveCriticalSection.
-When FastMM4-AVX uses "pause" and SwitchToThread(), tests that allocate,
-reallocate and release memory finish up to two times faster when the
-number of threads is the same or greater than the number of physical cores}
+
+If you wound not define the 3 options below, you will get the locking 
+mechanism from the original FastMM4}
 
 {$define SmallBlocksLockedCriticalSection}
 {$define MediumBlocksLockedCriticalSection}
 {$define LargeBlocksLockedCriticalSection}
 
 {$define CheckPauseAndSwitchToThreadForAsmVersion}
+
+
+{ Use this option if you need that releasing a lock on data structure,
+i.e. writing to a synchronization variable, to use bus-locking memory store 
+(lock xchg) rather than just the normal memory store (mov).
+Using bus-locking memory store to release a lock on data structure is
+an old approach of the original FastMM4, and is not recommended 
+for FastMM4-AVX. Look for "using normal memory store" in the comment section 
+at the beginning of the main .pas file for the discussion }
+{.$define InterlockedRelease}
 
 
 {-----------------------------Debugging Options-------------------------------}
@@ -210,7 +222,7 @@ number of threads is the same or greater than the number of physical cores}
    stack for valid return addresses. Note that this is significantly slower
    than using the stack frame tracing method, but is usually more complete. Has
    no effect unless FullDebugMode is enabled}
-  {$define RawStackTraces}
+  {.$define RawStackTraces}
 
   {Set this option to check for user code that uses an interface of a freed
    object. Note that this will disable the checking of blocks modified after
@@ -321,6 +333,13 @@ Combine it with the two options below for further fine-tuning.}
    message.}
   {.$define HideMemoryLeakHintMessage}
 
+  {Set this option to use QualifiedClassName equivalent instead of ClassName
+   equivalent during memory leak reporting.
+   This is useful for duplicate class names (like EConversionError, which is in
+   units Data.DBXJSONReflect, REST.JsonReflect and System.ConvUtils,
+   or TClipboard being in Vcl.Clibprd and WinAPI.ApplicationModel.DataTransfer }
+  {$define EnableMemoryLeakReportingUsesQualifiedClassName}
+
 {--------------------------Instruction Set Options----------------------------}
 
 {Set this option to enable the use of MMX instructions. Disabling this option
@@ -387,7 +406,7 @@ Combine it with the two options below for further fine-tuning.}
   FastMM4 checks whether AVX2 is supported by the CPU, and, if supported, never
   calls AVX1 functions, since calling "vzeroupper" even once in a thread
   significantly slows down all subsequent SSE code, which is not documented:
-  neither in the Intel 64 and IA-32 Architectures Software Developer’s Manual
+  neither in the Intel 64 and IA-32 Architectures Software Developers Manual
   nor in the Intel 64 and IA-32 Architectures Optimization Reference Manual.
 
   The code of AVX1 is grouped separately from the code of AVX2, to not scatter
